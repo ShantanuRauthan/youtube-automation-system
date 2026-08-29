@@ -14,6 +14,9 @@ yt-dlp>=2024.8.6
 # AI provider (Gemini free tier). Ollama uses plain HTTP, no extra dep.
 google-generativeai>=0.7.2
 
+# Local review dashboard (python dashboard.py).
+Flask>=3.0.0
+
 # Free AI voiceover (Microsoft neural voices, no API key). Offline "piper"
 # engine is optional: pip install piper-tts and set PIPER_MODEL.
 edge-tts>=6.1.9

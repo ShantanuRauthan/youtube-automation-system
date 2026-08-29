@@ -23,6 +23,7 @@ from pipeline import (
     context_writer,
     downloader,
     editor,
+    state,
     transcript as transcript_mod,
     uploader,
     voiceover,
@@ -62,7 +63,7 @@ def choose_category() -> tuple[str, dict]:
 # --------------------------------------------------------------------------- #
 #  Per-video processing
 # --------------------------------------------------------------------------- #
-def process_video(video, category_name: str, category_id: str, work_dir: str) -> list[dict]:
+def process_video(video, category_name: str, category_id: str, work_dir: str, run_id: int) -> list[dict]:
     produced: list[dict] = []
 
     step(f"Fetching transcript for: {video.title[:60]}")
@@ -86,13 +87,32 @@ def process_video(video, category_name: str, category_id: str, work_dir: str) ->
         return produced
 
     for idx, seg in enumerate(found, 1):
+        # Dedup: skip segments we've already turned into a Short (safe re-runs).
+        if config.dedup and state.segment_overlaps(video.video_id, seg.start, seg.end):
+            step(f"Segment {idx}: already used before ({seg.start:.0f}s–{seg.end:.0f}s) — skipping.")
+            continue
+
         step(f"Segment {idx}: {seg.start:.0f}s–{seg.end:.0f}s ({seg.duration:.0f}s) — {seg.hook[:50]}")
 
         base = f"{video.video_id}_short{idx}"
-        srt_path = os.path.join(work_dir, f"{base}.srt")
         out_path = os.path.join(config.output_dir, f"{base}.mp4")
 
-        captions.build_srt(segments_transcript, seg.start, seg.end, srt_path)
+        # Animated karaoke captions (ASS) or plain SRT, per config.
+        if config.karaoke_captions:
+            caption_path = os.path.join(work_dir, f"{base}.ass")
+            captions.build_ass(segments_transcript, seg.start, seg.end, caption_path)
+            caption_is_ass = True
+        else:
+            caption_path = os.path.join(work_dir, f"{base}.srt")
+            captions.build_srt(segments_transcript, seg.start, seg.end, caption_path)
+            caption_is_ass = False
+
+        # Emphasis moments used to trigger brief punch-in zooms.
+        kw_times = (
+            captions.keyword_times(segments_transcript, seg.start, seg.end)
+            if config.keyword_zoom
+            else []
+        )
 
         # Grab the transcript text inside this window (used for voiceover + context).
         snippet = " ".join(
@@ -119,14 +139,17 @@ def process_video(video, category_name: str, category_id: str, work_dir: str) ->
             source_path,
             seg.start,
             seg.end,
-            srt_path,
+            caption_path,
             out_path,
+            caption_is_ass=caption_is_ass,
             headline=seg.hook,
             brand_handle=config.brand_handle,
             source_credit=source_credit,
             show_header_bar=config.show_header_bar,
             show_watermark=config.show_watermark,
             reframe_zoom=config.reframe_zoom,
+            keyword_times=kw_times,
+            keyword_zoom_intensity=config.keyword_zoom_intensity,
             voiceover_path=voiceover_path,
             duck_volume=config.duck_volume,
         )
@@ -151,7 +174,12 @@ def process_video(video, category_name: str, category_id: str, work_dir: str) ->
             "youtube_id": None,
         }
 
-        if config.auto_upload:
+        yt_id: str | None = None
+        if config.review_mode:
+            # Hold for human approval in the dashboard; never auto-upload.
+            status = state.PENDING
+            step("Review mode on — saved as pending. Approve it in the dashboard.")
+        elif config.auto_upload:
             step("Uploading to YouTube")
             try:
                 yt_id = uploader.upload_short(
@@ -162,11 +190,33 @@ def process_video(video, category_name: str, category_id: str, work_dir: str) ->
                     category_id=category_id,
                 )
                 record["youtube_id"] = yt_id
+                status = state.UPLOADED
                 step(f"Uploaded: https://youtube.com/shorts/{yt_id} ({config.upload_privacy})")
             except Exception as exc:  # keep the local file even if upload fails
+                status = state.FAILED
                 step(f"Upload failed (file kept locally): {exc}")
         else:
+            status = state.SAVED
             step("AUTO_UPLOAD is off — Short saved locally only.")
+
+        # Persist to the state DB (dedup, history, and the review dashboard).
+        state.record_short(
+            run_id=run_id,
+            source_video_id=video.video_id,
+            source_url=video.url,
+            source_title=video.title,
+            seg_start=seg.start,
+            seg_end=seg.end,
+            file=out_path,
+            title=meta.title,
+            description=meta.description,
+            tags=meta.tags,
+            hashtags=meta.hashtags,
+            category_id=category_id,
+            hook=seg.hook,
+            status=status,
+            youtube_id=yt_id,
+        )
 
         # Save metadata sidecar next to the video.
         with open(out_path.replace(".mp4", ".json"), "w", encoding="utf-8") as fh:
@@ -191,14 +241,19 @@ def main() -> int:
         print("\nCopy .env.example to .env and fill in the values, then re-run.")
         return 1
 
+    state.init_db()
+
     category_name, category = choose_category()
     print(f"\nCategory: {category_name}  |  search query: '{category['query']}'")
-    print(f"AI provider: {config.ai_provider}  |  auto-upload: {config.auto_upload}")
+    upload_mode = "review (dashboard)" if config.review_mode else ("auto" if config.auto_upload else "off")
+    print(f"AI provider: {config.ai_provider}  |  upload mode: {upload_mode}")
     hr()
 
     os.makedirs(config.output_dir, exist_ok=True)
     work_dir = os.path.join(config.output_dir, "_work")
     os.makedirs(work_dir, exist_ok=True)
+
+    run_id = state.start_run(category_name, category["query"])
 
     step("Searching YouTube for high-view videos")
     videos = youtube_search.search_videos(category["query"])
@@ -215,10 +270,14 @@ def main() -> int:
     for video in videos:
         print(f"\nProcessing: {video.title[:60]}")
         try:
-            all_records.extend(process_video(video, category_name, category["category_id"], work_dir))
+            all_records.extend(
+                process_video(video, category_name, category["category_id"], work_dir, run_id)
+            )
         except Exception as exc:
             step(f"Error processing this video, skipping: {exc}")
             traceback.print_exc()
+
+    state.finish_run(run_id, produced=len(all_records))
 
     hr()
     print(f"\nDone. Produced {len(all_records)} Short(s) in '{config.output_dir}/'.")
@@ -227,6 +286,12 @@ def main() -> int:
         if r["youtube_id"]:
             line += f"  ->  https://youtube.com/shorts/{r['youtube_id']}"
         print(line)
+
+    if config.review_mode and all_records:
+        print(
+            f"\nReview & upload your Shorts:  python dashboard.py"
+            f"  ->  http://localhost:{config.dashboard_port}"
+        )
 
     return 0
 

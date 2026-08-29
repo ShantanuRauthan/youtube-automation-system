@@ -7,6 +7,9 @@ the underlying audio/video fingerprint still matches, and the original creator
 can still claim it. Reuse others' footage responsibly (commentary, analysis,
 education) and keep uploads private until you've confirmed you have the right
 to publish them.
+
+Captions can be plain SRT or animated karaoke ASS. When ``keyword_times`` are
+supplied, brief punch-in zooms fire on those emphasized moments to add motion.
 """
 
 from __future__ import annotations
@@ -38,7 +41,6 @@ def _escape_text(text: str) -> str:
     """Escape arbitrary text for the drawtext filter."""
     if not text:
         return ""
-    # Order matters: backslash first.
     text = text.replace("\\", r"\\")
     text = text.replace(":", r"\:")
     text = text.replace("'", r"\u2019")  # curly apostrophe avoids quote issues
@@ -60,47 +62,52 @@ def _wrap(text: str, width: int = 28) -> str:
             current = w
     if current:
         lines.append(current)
-    return "\n".join(lines[:3])  # cap at 3 lines
+    return "\n".join(lines[:3])
+
+
+def _zoom_expression(keyword_times: list[float], intensity: float, fps: int = 30) -> str:
+    """Build a zoompan 'z' expression: base 1.0 with a Gaussian bump at each
+    keyword time. ``on/fps`` is the running clip time in seconds."""
+    intensity = max(0.02, min(intensity, 0.4))
+    bumps = "+".join(
+        f"{intensity:.3f}*exp(-pow((on/{fps}-{t:.2f})/0.18,2))" for t in keyword_times
+    )
+    # Clamp so a cluster of keywords can't over-zoom.
+    return f"min(1.5,1.0+{bumps})"
 
 
 def make_short(
     source_path: str,
     start: float,
     end: float,
-    srt_path: str,
+    caption_path: str,
     output_path: str,
     *,
+    caption_is_ass: bool = False,
     headline: str = "",
     brand_handle: str = "",
     source_credit: str = "",
     show_header_bar: bool = True,
     show_watermark: bool = True,
     reframe_zoom: float = 1.06,
+    keyword_times: list[float] | None = None,
+    keyword_zoom_intensity: float = 0.0,
     voiceover_path: str = "",
     duck_volume: float = 0.15,
 ) -> str:
     """Produce a 1080x1920 Short with a blurred background, burned captions,
-    and optional transformative branding layers."""
+    optional transformative branding layers, and optional keyword punch-ins."""
     _ensure_ffmpeg()
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
 
     duration = max(0.1, end - start)
     zoom = max(1.0, min(reframe_zoom, 1.5))
 
-    # ----- foreground scale (with a gentle reframe zoom) -----
     fg_w = int(round(1080 * zoom))
     fg_w -= fg_w % 2  # keep even for libx264
 
-    # ----- caption style; pushed down a bit when a header bar is present -----
-    caption_margin_v = 90
-    subtitle_style = (
-        "FontName=Arial,Fontsize=16,PrimaryColour=&H00FFFFFF,"
-        "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,"
-        f"Alignment=2,MarginV={caption_margin_v}"
-    )
-    srt_escaped = _escape_for_filter(srt_path)
+    caption_escaped = _escape_for_filter(caption_path)
 
-    # ----- build the filtergraph in stages -----
     parts = [
         # blurred fill background
         "[0:v]scale=1080:1920:force_original_aspect_ratio=increase,"
@@ -148,15 +155,33 @@ def make_short(
         )
         last = "cr"
 
-    # burn in captions last so they sit on top of everything
-    parts.append(
-        f"[{last}]subtitles='{srt_escaped}':force_style='{subtitle_style}'[v]"
-    )
+    # burn in captions (ASS carries its own styling; SRT needs force_style)
+    if caption_is_ass:
+        parts.append(f"[{last}]subtitles='{caption_escaped}'[cap]")
+    else:
+        subtitle_style = (
+            "FontName=Arial,Fontsize=16,PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00000000,BorderStyle=1,Outline=2,Shadow=1,"
+            "Alignment=2,MarginV=90"
+        )
+        parts.append(
+            f"[{last}]subtitles='{caption_escaped}':force_style='{subtitle_style}'[cap]"
+        )
+    last = "cap"
+
+    # keyword punch-in zooms (fixed 1080x1920 output, so this is reliable)
+    use_zoom = bool(keyword_times) and keyword_zoom_intensity > 0
+    if use_zoom:
+        z_expr = _zoom_expression(keyword_times, keyword_zoom_intensity)
+        parts.append(
+            f"[{last}]fps=30,zoompan=z='{z_expr}':"
+            "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            "d=1:s=1080x1920[vz]"
+        )
+        last = "vz"
 
     use_vo = bool(voiceover_path and os.path.exists(voiceover_path))
     if use_vo:
-        # Duck the original audio and mix the commentary on top. The voiceover
-        # is input #1 and starts at 0 (the same instant the clip begins).
         duck = max(0.0, min(duck_volume, 1.0))
         parts.append(
             f"[0:a]volume={duck:.3f}[duck];"
@@ -172,7 +197,7 @@ def make_short(
     cmd += [
         "-t", f"{duration:.3f}",
         "-filter_complex", filter_complex,
-        "-map", "[v]",
+        "-map", f"[{last}]",
         "-map", "[aout]" if use_vo else "0:a?",
         "-c:v", "libx264",
         "-preset", "medium",

@@ -72,6 +72,22 @@ class Config:
     reframe_zoom: float = field(default_factory=lambda: float(os.getenv("REFRAME_ZOOM", "1.06")))
     credit_source: bool = field(default_factory=lambda: _get_bool("CREDIT_SOURCE", True))
 
+    # Animated captions + motion.
+    #   karaoke_captions = word-by-word highlighted (ASS) captions instead of plain SRT
+    #   keyword_zoom     = brief punch-in zooms on emphasized moments (numbers, strong words)
+    karaoke_captions: bool = field(default_factory=lambda: _get_bool("KARAOKE_CAPTIONS", True))
+    keyword_zoom: bool = field(default_factory=lambda: _get_bool("KEYWORD_ZOOM", True))
+    keyword_zoom_intensity: float = field(default_factory=lambda: float(os.getenv("KEYWORD_ZOOM_INTENSITY", "0.12")))
+
+    # State / review workflow.
+    #   review_mode = produce Shorts as "pending review" and DON'T auto-upload;
+    #                 approve + upload them from the dashboard (python dashboard.py).
+    #   dedup       = skip source segments already turned into a Short (safe re-runs).
+    state_db: str = field(default_factory=lambda: os.getenv("STATE_DB", os.path.join(os.getenv("OUTPUT_DIR", "output"), "state.db")))
+    review_mode: bool = field(default_factory=lambda: _get_bool("REVIEW_MODE", True))
+    dedup: bool = field(default_factory=lambda: _get_bool("DEDUP", True))
+    dashboard_port: int = field(default_factory=lambda: _get_int("DASHBOARD_PORT", 5000))
+
     # Voiceover commentary (the biggest transformative-use win).
     #   off  = no voiceover (default)
     #   ai   = AI writes a script, TTS speaks it
