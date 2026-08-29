@@ -1,0 +1,23 @@
+# Core
+python-dotenv>=1.0.1
+requests>=2.32.0
+
+# YouTube search + upload (Google APIs)
+google-api-python-client>=2.137.0
+google-auth-oauthlib>=1.2.1
+google-auth-httplib2>=0.2.0
+
+# Transcript + download
+youtube-transcript-api>=0.6.2
+yt-dlp>=2024.8.6
+
+# AI provider (Gemini free tier). Ollama uses plain HTTP, no extra dep.
+google-generativeai>=0.7.2
+
+# Free AI voiceover (Microsoft neural voices, no API key). Offline "piper"
+# engine is optional: pip install piper-tts and set PIPER_MODEL.
+edge-tts>=6.1.9
+
+# Optional Whisper fallback for videos with no transcript.
+# Heavy (pulls torch). Install manually if you want it:
+#   pip install openai-whisper
