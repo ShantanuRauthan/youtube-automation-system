@@ -34,19 +34,31 @@ def _parse_iso8601_duration(duration: str) -> int:
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
+# YouTube's Music category id. Sorting any broad query by raw view count floats
+# music videos to the top (they dominate global view counts), which is why a
+# "motivational speech" search was returning songs literally titled "Motivation".
+# We drop this category unless the user explicitly wants music.
+_MUSIC_CATEGORY_ID = "10"
+
+
 def search_videos(query: str) -> list[VideoInfo]:
-    """Return top videos for a query, ordered by view count, filtered by config."""
+    """Return topically-relevant, high-view videos for a query.
+
+    Strategy: search by RELEVANCE (not raw viewCount, which is music-biased),
+    pull a large candidate pool, drop Music-category results, then sort the
+    remaining relevant videos by view count.
+    """
     youtube = build("youtube", "v3", developerKey=config.youtube_api_key, cache_discovery=False)
 
-    # Pull more candidates than we need so filtering still leaves enough.
+    # Pull a big relevant candidate pool so filtering still leaves enough.
     search_resp = (
         youtube.search()
         .list(
             q=query,
             part="id",
             type="video",
-            order="viewCount",
-            maxResults=min(50, config.max_videos * 8),
+            order="relevance",
+            maxResults=50,
             relevanceLanguage="en",
             videoEmbeddable="true",
         )
@@ -65,9 +77,14 @@ def search_videos(query: str) -> list[VideoInfo]:
 
     results: list[VideoInfo] = []
     for item in details.get("items", []):
+        snippet = item.get("snippet", {})
         views = int(item.get("statistics", {}).get("viewCount", 0))
         duration = _parse_iso8601_duration(item.get("contentDetails", {}).get("duration", ""))
 
+        # Skip music videos (unless the user explicitly allows them) — this is
+        # the main reason songs were showing up for non-music categories.
+        if config.exclude_music and snippet.get("categoryId") == _MUSIC_CATEGORY_ID:
+            continue
         if views < config.min_views:
             continue
         if duration == 0 or duration > config.max_source_seconds:
@@ -76,13 +93,13 @@ def search_videos(query: str) -> list[VideoInfo]:
         results.append(
             VideoInfo(
                 video_id=item["id"],
-                title=item["snippet"]["title"],
-                channel=item["snippet"]["channelTitle"],
+                title=snippet.get("title", ""),
+                channel=snippet.get("channelTitle", ""),
                 views=views,
                 duration_seconds=duration,
             )
         )
 
-    # Preserve view-count ordering, keep only what we need.
+    # Among the topically-relevant results, prefer the most-viewed.
     results.sort(key=lambda v: v.views, reverse=True)
     return results[: config.max_videos]

@@ -27,16 +27,16 @@ def _get_int(key: str, default: int) -> int:
 # YouTube "video category IDs" used when uploading (US region).
 # The keys are the friendly categories shown in the CLI menu.
 CATEGORIES: dict[str, dict] = {
-    "Technology": {"query": "technology explained", "category_id": "28"},
-    "Science": {"query": "science facts", "category_id": "28"},
-    "Education": {"query": "educational explainer", "category_id": "27"},
-    "Gaming": {"query": "gaming highlights", "category_id": "20"},
-    "Comedy": {"query": "funny moments", "category_id": "23"},
-    "Motivation": {"query": "motivational speech", "category_id": "22"},
-    "Finance": {"query": "personal finance tips", "category_id": "25"},
-    "Fitness": {"query": "fitness workout tips", "category_id": "17"},
-    "Cooking": {"query": "cooking recipe", "category_id": "26"},
-    "History": {"query": "history documentary", "category_id": "27"},
+    "Technology": {"query": "technology explained interview", "category_id": "28"},
+    "Science": {"query": "science explained documentary", "category_id": "28"},
+    "Education": {"query": "educational explainer lecture", "category_id": "27"},
+    "Gaming": {"query": "gaming highlights commentary", "category_id": "20"},
+    "Comedy": {"query": "standup comedy clip interview", "category_id": "23"},
+    "Motivation": {"query": "motivational speech podcast", "category_id": "22"},
+    "Finance": {"query": "personal finance advice explained", "category_id": "25"},
+    "Fitness": {"query": "fitness workout tips coach", "category_id": "17"},
+    "Cooking": {"query": "cooking recipe tutorial chef", "category_id": "26"},
+    "History": {"query": "history documentary explained", "category_id": "27"},
 }
 
 
@@ -64,6 +64,10 @@ class Config:
     max_videos: int = field(default_factory=lambda: _get_int("MAX_VIDEOS", 3))
     shorts_per_video: int = field(default_factory=lambda: _get_int("SHORTS_PER_VIDEO", 1))
     min_views: int = field(default_factory=lambda: _get_int("MIN_VIEWS", 100_000))
+    # Drop YouTube Music-category results. Sorting by views is heavily music-biased,
+    # so this stops songs (e.g. tracks titled "Motivation") from hijacking non-music
+    # categories. Set EXCLUDE_MUSIC=false only if you actually want music videos.
+    exclude_music: bool = field(default_factory=lambda: _get_bool("EXCLUDE_MUSIC", True))
     min_short_seconds: int = field(default_factory=lambda: _get_int("MIN_SHORT_SECONDS", 15))
     max_short_seconds: int = field(default_factory=lambda: _get_int("MAX_SHORT_SECONDS", 60))
     max_source_seconds: int = field(default_factory=lambda: _get_int("MAX_SOURCE_SECONDS", 1800))
