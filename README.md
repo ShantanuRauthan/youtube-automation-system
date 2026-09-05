@@ -4,7 +4,8 @@ One command turns high-view YouTube videos into captioned vertical Shorts and (o
 
 ```
 YouTube search  ->  transcript  ->  AI analysis  ->  interesting segments
-   ->  FFmpeg vertical crop  ->  burned captions  ->  AI-written context  ->  Short  ->  auto-upload
+   ->  FFmpeg vertical crop  ->  karaoke captions  ->  keyword zooms
+   ->  AI-written context  ->  review dashboard  ->  upload
 ```
 
 ## What it does
@@ -12,11 +13,13 @@ YouTube search  ->  transcript  ->  AI analysis  ->  interesting segments
 1. Asks you for a **category** (menu or free-form topic).
 2. Searches YouTube for the **highest-view** videos on that topic.
 3. Pulls each video's **timestamped transcript** (Whisper fallback if none exists).
-4. Uses a **free AI provider** to pick the most engaging segments.
+4. Uses **AI** (Groq, Gemini, or Ollama) to pick the most engaging segments.
 5. Downloads the video and uses **FFmpeg** to crop it to 9:16 with a blurred background.
-6. **Burns captions** built from the real transcript timestamps.
-7. Uses AI to write a **title, description, tags, and hashtags**.
-8. Optionally **uploads** the finished Short to your channel.
+6. Burns **karaoke captions** (word-by-word highlighted ASS) from the real transcript timestamps.
+7. Adds **keyword zooms** — brief punch-in effects on emphasis moments (numbers, strong words).
+8. Uses AI to write a **title, description, tags, and hashtags**.
+9. Saves Shorts to a **review dashboard** for human approval before uploading.
+10. Optionally **uploads** the finished Short to your channel.
 
 Everything after choosing the category is automatic.
 
@@ -31,7 +34,9 @@ Everything after choosing the category is automatic.
 ## Setup
 
 ```bash
-# 1. Install dependencies
+# 1. Create a virtual environment and install dependencies
+python3 -m venv venv
+source venv/bin/activate        # run this every time you open a new terminal
 pip install -r requirements.txt
 
 # 2. Configure
@@ -50,8 +55,9 @@ cp .env.example .env
    - Put it in `.env` as `YOUTUBE_API_KEY`
 
 2. **AI provider** (free) — pick one in `.env`:
-   - `AI_PROVIDER=gemini` → get a free key at https://aistudio.google.com/app/apikey and set `GEMINI_API_KEY`
-   - `AI_PROVIDER=ollama` → fully offline/free. Install https://ollama.com, run `ollama pull llama3.1`, then `ollama serve`
+   - `AI_PROVIDER=groq` (**recommended**) — free, fast, high limits. Get a key at https://console.groq.com/keys and set `GROQ_API_KEY`
+   - `AI_PROVIDER=gemini` — free tier, lower limits. Get a key at https://aistudio.google.com/app/apikey and set `GEMINI_API_KEY`
+   - `AI_PROVIDER=ollama` — fully offline/free. Install https://ollama.com, run `ollama pull llama3.1`, then `ollama serve`
 
 3. **Google OAuth** (for auto-upload) — required only if `AUTO_UPLOAD=true`
    - In Google Cloud Console → **Credentials** → **Create OAuth client ID** → **Desktop app**
@@ -61,22 +67,46 @@ cp .env.example .env
 ## Run
 
 ```bash
+source venv/bin/activate
 python main.py
 ```
 
-Pick a category, then let it work. Finished Shorts and their metadata land in `output/`.
+Pick a category, then let it work. Shorts are saved as "pending review" by default.
+
+### Review dashboard
+
+```bash
+python dashboard.py
+```
+
+Opens at `http://localhost:5000`. Preview every Short, edit title/description/tags, then approve, reject, or upload — one click each.
 
 ## Tuning (`.env`)
 
-| Variable | Meaning |
-|---|---|
-| `MAX_VIDEOS` | How many source videos per run |
-| `SHORTS_PER_VIDEO` | Shorts to cut from each source video |
-| `MIN_VIEWS` | Only use videos with at least this many views |
-| `MIN_SHORT_SECONDS` / `MAX_SHORT_SECONDS` | Short length bounds |
-| `MAX_SOURCE_SECONDS` | Skip source videos longer than this |
-| `AUTO_UPLOAD` | `true` to publish automatically |
-| `UPLOAD_PRIVACY` | `private`, `unlisted`, or `public` |
+| Variable | Default | Meaning |
+|---|---|---|
+| `REVIEW_MODE` | `true` | Hold Shorts for human approval instead of auto-uploading |
+| `DEDUP` | `true` | Skip source segments already turned into a Short (safe re-runs) |
+| `AUTO_UPLOAD` | `true` | Publish automatically (only when `REVIEW_MODE=false`) |
+| `UPLOAD_PRIVACY` | `private` | `private`, `unlisted`, or `public` |
+| `MAX_VIDEOS` | `3` | How many source videos per run |
+| `SHORTS_PER_VIDEO` | `1` | Shorts to cut from each source video |
+| `MIN_VIEWS` | `100000` | Only use videos with at least this many views |
+| `MIN_SHORT_SECONDS` / `MAX_SHORT_SECONDS` | `15` / `60` | Short length bounds |
+| `MAX_SOURCE_SECONDS` | `1800` | Skip source videos longer than this |
+| `KARAOKE_CAPTIONS` | `true` | Word-by-word highlighted ASS captions (vs plain SRT) |
+| `KEYWORD_ZOOM` | `true` | Brief punch-in zooms on emphasis moments |
+| `KEYWORD_ZOOM_INTENSITY` | `0.12` | Zoom intensity (0.02–0.40) |
+| `BRAND_HANDLE` | empty | Channel handle shown as corner watermark |
+| `SHOW_HEADER_BAR` | `true` | Draw a top banner with the AI-written hook |
+| `SHOW_WATERMARK` | `true` | Draw the brand handle watermark |
+| `REFRAME_ZOOM` | `1.06` | Gentle foreground zoom (1.0–1.5) |
+| `CREDIT_SOURCE` | `true` | Small "Source: ..." credit near the bottom |
+| `VOICEOVER_MODE` | `off` | `off`, `ai`, or `file` — spoken commentary over each clip |
+| `VOICEOVER_ENGINE` | `edge` | `edge` (online TTS) or `piper` (offline) |
+| `VOICEOVER_VOICE` | `en-US-AndrewMultilingualNeural` | edge-tts voice name |
+| `DUCK_VOLUME` | `0.15` | Lower original audio under voiceover (0.0–1.0) |
+| `DASHBOARD_PORT` | `5000` | Port for the review dashboard |
 
 ## Notes & responsibility
 
@@ -88,14 +118,18 @@ Pick a category, then let it work. Finished Shorts and their metadata land in `o
 
 ```
 main.py                 # single-command orchestrator
+dashboard.py            # Flask review dashboard (python dashboard.py)
 config.py               # env config + category presets
 pipeline/
   youtube_search.py     # Data API search by views
   transcript.py         # captions + Whisper fallback
   downloader.py         # yt-dlp download
   analyzer.py           # AI -> interesting segments
-  captions.py           # transcript timestamps -> SRT
-  editor.py             # FFmpeg vertical crop + burn captions
+  captions.py           # SRT + karaoke ASS captions
+  editor.py             # FFmpeg vertical crop + burn captions + keyword zooms
   context_writer.py     # AI title/description/tags
   uploader.py           # Google OAuth upload
+  voiceover.py          # TTS commentary (edge-tts / piper)
+  state.py              # SQLite state: dedup, run history, review workflow
+  ai.py                 # AI provider abstraction (Groq, Gemini, Ollama)
 ```
