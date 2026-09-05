@@ -50,9 +50,13 @@ class Config:
     # AI provider
     ai_provider: str = field(default_factory=lambda: os.getenv("AI_PROVIDER", "gemini").strip().lower())
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
-    gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-2.0-flash"))
+    gemini_model: str = field(default_factory=lambda: os.getenv("GEMINI_MODEL", "gemini-flash-latest"))
     ollama_host: str = field(default_factory=lambda: os.getenv("OLLAMA_HOST", "http://localhost:11434"))
     ollama_model: str = field(default_factory=lambda: os.getenv("OLLAMA_MODEL", "llama3.1"))
+    # Groq: free, fast, hosted open-source models (Llama etc). OpenAI-compatible API.
+    # Get a free key at https://console.groq.com/keys — far higher limits than Gemini free tier.
+    groq_api_key: str = field(default_factory=lambda: os.getenv("GROQ_API_KEY", ""))
+    groq_model: str = field(default_factory=lambda: os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile"))
 
     # Behaviour
     auto_upload: bool = field(default_factory=lambda: _get_bool("AUTO_UPLOAD", True))
@@ -106,8 +110,10 @@ class Config:
             problems.append("YOUTUBE_API_KEY is not set (needed to search videos).")
         if self.ai_provider == "gemini" and not self.gemini_api_key:
             problems.append("AI_PROVIDER=gemini but GEMINI_API_KEY is not set.")
-        if self.ai_provider not in {"gemini", "ollama"}:
-            problems.append(f"AI_PROVIDER must be 'gemini' or 'ollama', got '{self.ai_provider}'.")
+        if self.ai_provider == "groq" and not self.groq_api_key:
+            problems.append("AI_PROVIDER=groq but GROQ_API_KEY is not set (get one free at https://console.groq.com/keys).")
+        if self.ai_provider not in {"gemini", "groq", "ollama"}:
+            problems.append(f"AI_PROVIDER must be 'gemini', 'groq', or 'ollama', got '{self.ai_provider}'.")
         if self.auto_upload and not os.path.exists(self.client_secret_file):
             problems.append(
                 f"AUTO_UPLOAD=true but OAuth file '{self.client_secret_file}' was not found. "

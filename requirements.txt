@@ -21,6 +21,10 @@ Flask>=3.0.0
 # engine is optional: pip install piper-tts and set PIPER_MODEL.
 edge-tts>=6.1.9
 
-# Optional Whisper fallback for videos with no transcript.
-# Heavy (pulls torch). Install manually if you want it:
-#   pip install openai-whisper
+# Optional local speech-to-text fallback for videos with NO YouTube captions
+# (e.g. music/dance clips). Install ONE of these manually:
+#   pip install faster-whisper      # recommended: light, fast, no torch
+#   pip install openai-whisper      # heavier, pulls in torch
+#
+# IMPORTANT: do NOT `pip install whisper` — that is a different, unrelated
+# package that will break the fallback (no load_model).

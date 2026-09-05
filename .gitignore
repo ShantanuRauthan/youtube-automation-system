@@ -6,10 +6,23 @@ __v0_jsx-dev-runtime.ts
 .v0-trash/
 .vercel/
 
-# Environment variables
+# Environment variables (secrets)
+.env
 .env*.local
+
+# Google OAuth credentials
+client_secret.json
+token.json
+
+# Output and cache
+output/
+__pycache__/
+pipeline/__pycache__/
 
 # Common ignores
 node_modules
 .next/
 .DS_Store
+
+# Virtual environment
+venv/
