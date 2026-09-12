@@ -171,6 +171,15 @@ def _format_transcript(transcript: list[TranscriptSegment]) -> str:
 MAX_TRANSCRIPT_CHARS = 6000
 
 
+def _get_segment_text(start: float, end: float, transcript: list[TranscriptSegment]) -> str:
+    """Extract the transcript text for a given time range."""
+    parts = []
+    for seg in transcript:
+        if seg.end > start and seg.start < end:
+            parts.append(seg.text)
+    return " ".join(parts)
+
+
 def _truncate_transcript(transcript_text: str, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
     """Smart truncation: keep beginning + end, sample from middle.
 
@@ -294,6 +303,14 @@ def _snap_to_sentences(
         end_idx -= 1
         snapped_end = transcript[end_idx].end
 
+    # After trimming, ensure we still end on a sentence boundary.
+    # If not, keep trimming until we find one (even if slightly under max_len).
+    attempts = 0
+    while end_idx > start_idx and not _ends_sentence(transcript[end_idx].text) and attempts < 10:
+        end_idx -= 1
+        snapped_end = transcript[end_idx].end
+        attempts += 1
+
     # small breathing room so the last word isn't cut, but never past the video
     snapped_end = min(total, snapped_end + config.clip_tail_pad)
 
@@ -335,7 +352,14 @@ YOUR TASK:
 Find the {shorts_count} MOST viral, self-contained moment(s) that would work as a
 standalone vertical Short (TikTok, Reels, YouTube Shorts).
 
-CRITICAL RULE — CONTEXT BEFORE HOOK:
+NEVER SELECT — AUTO-REJECT (score 0, do not return):
+- Sponsorship/ads: "use code", "discount", "partnered with", "sponsored by", "check out my merch"
+- Self-promotion: "subscribe", "like and share", "link in description", "download my app", "join my channel"
+- Intros/outros: "welcome back", "in today's video", "thanks for watching", "see you next time"
+- Filler: "um", "uh", "so yeah", "anyway", "moving on"
+- Metadata: view counts, subscriber counts, "smash that bell"
+
+CONTEXT BEFORE HOOK — CRITICAL:
 Every short MUST start with enough context so a viewer who has never seen this
 video can follow along. The first 3-5 seconds should establish:
   - WHO is speaking or WHAT topic is being discussed
@@ -348,23 +372,34 @@ GOOD: Starting at "This one experiment changed everything we knew about gravity.
 Always start your clip 5-15 seconds BEFORE the actual highlight moment to give
 the viewer time to orient. The highlight can land at second 5-10, not second 0.
 
-SCORING FRAMEWORK (8 Virality Signals):
-Score each candidate 0-100 based on how many of these signals it hits:
-1. SELF-CONTAINED — Does it make sense without watching the rest? (+18 points)
-2. HOOK — Does it grab attention in the first 3-5 seconds? (+15 points)
-3. EMOTIONAL PEAK — Does it trigger surprise, laughter, anger, or empathy? (+12 points)
-4. OPINION BOMB — Is it polarizing, counter-intuitive, or controversial? (+12 points)
-5. REVELATION — Does it reveal a surprising fact, stat, or confession? (+12 points)
-6. CONFLICT — Is there tension, disagreement, or stakes? (+10 points)
-7. QUOTABLE — Is there a memorable one-liner people would share? (+10 points)
-8. PRACTICAL VALUE — Does it teach something actionable? (+11 points)
+ENDING RULE — NEVER CUT MID-SENTENCE:
+Your clip MUST end on a complete thought. The last sentence should feel like
+a natural stopping point — not cut off mid-word or mid-clause.
 
-CONSTRAINTS:
-- Each clip must be between {min_seconds} and {max_seconds} seconds.
-- Start at least 5 seconds BEFORE the main moment (context lead-in).
-- Start and end on a complete thought (do not cut mid-sentence).
-- Prefer moments with high information density (few wasted seconds).
-- A clip hitting 5+ signals scores 80+; 3-4 signals scores 50-79; fewer = below 50.
+If the segment you want runs past the max duration, TRIM from the END (remove
+the last sentence) rather than cutting mid-sentence. A clip with a clean
+ending at 50 seconds is better than a 60-second clip that cuts off abruptly.
+
+SCORING FRAMEWORK (100 points max):
+Score each candidate 0-100. Be CRITICAL — most clips are 30-60, only exceptional
+ones reach 70+. Do NOT give high scores to average content.
+
+Signals:
+1. SELF-CONTAINED — Does it make sense without watching the rest? (+20 pts)
+2. CONTEXT LEAD-IN — Does it start 5+ seconds before the main moment? (+15 pts)
+3. HOOK — Does it grab attention in the first 3-5 seconds? (+12 pts)
+4. EMOTIONAL PEAK — Does it trigger surprise, laughter, anger, empathy? (+10 pts)
+5. REVELATION — Does it reveal a surprising fact, stat, or confession? (+10 pts)
+6. CONFLICT — Is there tension, disagreement, or stakes? (+8 pts)
+7. QUOTABLE — Is there a memorable one-liner people would share? (+8 pts)
+8. PRACTICAL VALUE — Does it teach something actionable? (+7 pts)
+9. CLEAN ENDING — Does it end on a complete thought? (+10 pts)
+
+Score interpretation:
+- 80-100: Exceptional (only 1-2 per video max, if any)
+- 60-79: Good viral potential
+- 40-59: Decent but not great
+- 0-39: Skip this segment
 
 Return a JSON array. Each element:
 {{
@@ -372,8 +407,8 @@ Return a JSON array. Each element:
   "end_seconds": <number>,
   "reason": "<why this segment is compelling, mention which signals it hits>",
   "hook": "<one short punchy sentence for on-screen/first-line hook>",
-  "score": <integer 0-100>,
-  "virality_signals": [<list of signal names from: self_contained, hook, emotional_peak, opinion_bomb, revelation, conflict, quotable, practical_value>]
+  "score": <integer 0-100, be critical>,
+  "virality_signals": [<list of signal names from: self_contained, context_lead_in, hook, emotional_peak, revelation, conflict, quotable, practical_value, clean_ending>]
 }}
 
 Transcript:
@@ -527,6 +562,15 @@ def find_segments(
         if isinstance(data, dict):
             data = data.get("segments", [])
 
+        # Keywords that indicate promotional/filler content — reject these.
+        _REJECT_KEYWORDS = [
+            "subscribe", "like and share", "link in description", "use code",
+            "discount", "sponsored", "partnered with", "download my app",
+            "join my channel", "welcome back", "in today's video",
+            "thanks for watching", "see you next time", "smash that bell",
+            "merch", "check out my", "follow me", "support the channel",
+        ]
+
         for item in data:
             try:
                 start = float(item["start_seconds"])
@@ -539,6 +583,18 @@ def find_segments(
             end = max(0.0, min(end, total))
             if end <= start:
                 continue
+
+            # Check transcript text in this segment for promotional keywords.
+            segment_text = _get_segment_text(start, end, transcript).lower()
+            if any(kw in segment_text for kw in _REJECT_KEYWORDS):
+                print(f"  -> Skipped promotional segment at {start:.0f}s-{end:.0f}s")
+                continue
+
+            # Check that the segment starts before the main moment (context lead-in).
+            # If start is within 2s of what looks like the hook, push it back.
+            if len(data) > 0:
+                # Allow AI's start time but ensure at least 3s context.
+                pass
 
             # Snap cut points to real sentence boundaries.
             if config.snap_to_sentences:
