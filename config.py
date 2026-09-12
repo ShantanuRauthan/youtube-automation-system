@@ -131,6 +131,15 @@ class Config:
     music_bed: str = field(default_factory=lambda: os.getenv("MUSIC_BED", "").strip())
     music_volume: float = field(default_factory=lambda: float(os.getenv("MUSIC_VOLUME", "0.08")))
 
+    # Music mode: how background music is selected.
+    #   off  = no background music (default)
+    #   auto = AI-selected mood-based music from the music/ directory
+    #   file = use MUSIC_BED as a single track for every Short
+    music_mode: str = field(default_factory=lambda: os.getenv("MUSIC_MODE", "off").strip().lower())
+    # Override the mood-based selection with a specific mood (chill, happy, dark,
+    # epic, sad, focus, comedy, action). Empty = auto-detect from content type.
+    music_mood: str = field(default_factory=lambda: os.getenv("MUSIC_MOOD", "").strip().lower())
+
     # Discovery: auto-pick a trending, low-competition topic instead of choosing
     # a category by hand. Uses YouTube trending + (optionally) Google Trends.
     discovery_region: str = field(default_factory=lambda: os.getenv("DISCOVERY_REGION", "US").strip())
@@ -207,6 +216,12 @@ class Config:
             )
         if self.voiceover_mode == "ai" and self.voiceover_engine == "piper" and not self.piper_model:
             problems.append("VOICEOVER_ENGINE=piper requires PIPER_MODEL (path to a .onnx voice).")
+        if self.music_mode not in {"off", "auto", "file"}:
+            problems.append("MUSIC_MODE must be off, auto, or file.")
+        if self.music_mode == "file" and not self.music_bed:
+            problems.append("MUSIC_MODE=file requires MUSIC_BED (path to an audio file).")
+        if self.music_mode == "file" and self.music_bed and not os.path.exists(self.music_bed):
+            problems.append(f"MUSIC_MODE=file but MUSIC_BED '{self.music_bed}' was not found.")
         return problems
 
 

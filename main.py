@@ -25,6 +25,7 @@ from pipeline import (
     discovery,
     downloader,
     editor,
+    music,
     state,
     thumbnail,
     transcript as transcript_mod,
@@ -113,6 +114,14 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
         return produced
 
     step("Analyzing transcript for interesting segments (AI)")
+
+    # Detect content type once per video for music selection.
+    transcript_text = " ".join(t.text for t in segments_transcript)
+    try:
+        content_type, _density = analyzer._classify_content(transcript_text, video.title)
+    except Exception:
+        content_type = "other"
+
     found = analyzer.find_segments(segments_transcript, video.title, perf_hint=perf_hint)
     if not found:
         step("AI found no strong segments. Skipping.")
@@ -175,6 +184,23 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
 
         step("Cropping to vertical + burning captions + branding (FFmpeg)")
         source_credit = f"Source: {video.title[:40]}" if config.credit_source else ""
+
+        # Music selection: auto-detect mood from content type, or use override.
+        music_path = ""
+        music_vol = 0.0
+        if config.music_mode == "auto":
+            selected_track = music.select_music(
+                content_type=content_type,
+                mood_override=config.music_mood,
+            )
+            if selected_track:
+                music_path = selected_track.path
+                music_vol = config.music_volume
+                step(f"Background music: {selected_track.filename} ({selected_track.mood})")
+        elif config.music_mode == "file" and config.music_bed:
+            music_path = config.music_bed
+            music_vol = config.music_volume
+
         editor.make_short(
             source_path,
             seg.start,
