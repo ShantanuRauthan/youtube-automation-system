@@ -14,6 +14,7 @@ works out of the box.
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 import time
 import urllib.request
@@ -25,43 +26,41 @@ from pathlib import Path
 # Mood -> search keywords and how many tracks to download.
 MOODS: dict[str, dict] = {
     "chill": {
-        "keywords": ["lofi chill", "ambient calm", "relax smooth"],
+        "keywords": ["lofi", "ambient", "calm", "relax", "chill"],
         "count": 5,
     },
     "happy": {
-        "keywords": ["upbeat happy", "positive fun", "bright pop"],
+        "keywords": ["upbeat", "happy", "positive", "fun", "bright"],
         "count": 5,
     },
     "dark": {
-        "keywords": ["dark suspense", "mystery tense", "noir eerie"],
+        "keywords": ["dark", "suspense", "mystery", "tense", "noir"],
         "count": 5,
     },
     "epic": {
-        "keywords": ["epic cinematic", "dramatic trailer", "orchestral powerful"],
+        "keywords": ["epic", "cinematic", "dramatic", "trailer", "orchestral"],
         "count": 5,
     },
     "sad": {
-        "keywords": ["melancholy emotional", "piano gentle", "reflective somber"],
+        "keywords": ["melancholy", "emotional", "piano", "gentle", "sad"],
         "count": 3,
     },
     "focus": {
-        "keywords": ["minimal study", "corporate clean", "tech concentration"],
+        "keywords": ["minimal", "study", "corporate", "clean", "tech"],
         "count": 3,
     },
     "comedy": {
-        "keywords": ["quirky playful", "funny lighthearted", "goofy silly"],
+        "keywords": ["quirky", "playful", "funny", "lighthearted", "silly"],
         "count": 3,
     },
     "action": {
-        "keywords": ["energetic fast", "workout sports", "adrenaline pump"],
+        "keywords": ["energetic", "fast", "workout", "sports", "action"],
         "count": 3,
     },
 }
 
 MUSIC_DIR = Path(__file__).parent.parent / "music"
 API_BASE = "https://pixabay.com/api/"
-MIN_DURATION = 30   # seconds — skip very short jingles
-MAX_DURATION = 180  # seconds — skip very long tracks
 
 
 def get_api_key() -> str:
@@ -74,13 +73,26 @@ def get_api_key() -> str:
     print("\nPixabay Music Downloader")
     print("=" * 50)
     print("Get a FREE API key at: https://pixabay.com/api/docs/")
-    print("(Sign up → API tab → copy your key)")
+    print("(Sign up -> API tab -> copy your key)")
     print()
     key = input("Enter your Pixabay API key: ").strip()
     if not key:
         print("Error: API key is required.")
         sys.exit(1)
     return key
+
+
+def get_audio_duration(path: str) -> float:
+    """Get duration of an audio file in seconds using ffprobe."""
+    try:
+        result = subprocess.run(
+            ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+             "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=10,
+        )
+        return float(result.stdout.strip())
+    except (subprocess.SubprocessError, ValueError):
+        return 0.0
 
 
 def search_music(api_key: str, query: str, per_page: int = 20) -> list[dict]:
@@ -141,17 +153,11 @@ def download_for_mood(api_key: str, mood: str, config: dict) -> list[str]:
         print(f"\n  Searching: '{keyword}' ...")
         tracks = search_music(api_key, keyword, per_page=10)
 
-        # Filter by duration.
-        valid = [
-            t for t in tracks
-            if MIN_DURATION <= t.get("duration", 0) <= MAX_DURATION
-        ]
-
-        if not valid:
-            print(f"  No tracks in duration range ({MIN_DURATION}-{MAX_DURATION}s)")
+        if not tracks:
+            print(f"  No results found")
             continue
 
-        for track in valid:
+        for track in tracks:
             if len(downloaded) >= target_count:
                 break
 
@@ -161,7 +167,6 @@ def download_for_mood(api_key: str, mood: str, config: dict) -> list[str]:
 
             # Build filename with mood keyword.
             tags = track.get("tags", "")
-            artist = track.get("user", "unknown")
             name_part = sanitize_filename(tags[:40]) if tags else sanitize_filename(keyword)
             filename = f"{mood}-{name_part}.mp3"
             dest = MUSIC_DIR / filename
@@ -173,6 +178,16 @@ def download_for_mood(api_key: str, mood: str, config: dict) -> list[str]:
 
             print(f"  Downloading: {filename}")
             if download_track(audio_url, dest):
+                # Check duration after download.
+                duration = get_audio_duration(str(dest))
+                if duration > 0 and duration < 15:
+                    print(f"  Too short ({duration:.0f}s), removing")
+                    dest.unlink()
+                    continue
+                if duration > 300:
+                    print(f"  Too long ({duration:.0f}s), removing")
+                    dest.unlink()
+                    continue
                 downloaded.append(filename)
                 # Be nice to the API.
                 time.sleep(1)
