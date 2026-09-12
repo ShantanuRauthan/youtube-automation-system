@@ -167,7 +167,52 @@ def _format_transcript(transcript: list[TranscriptSegment]) -> str:
     return "\n".join(lines)
 
 
+def _truncate_transcript(transcript_text: str, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
+    """Smart truncation: keep beginning + end, sample from middle.
+
+    Hook moments are often at the start or end of a video. We keep the
+    first 20% and last 20% of the text, then fill the middle with evenly
+    spaced samples to stay under max_chars.
+    """
+    if len(transcript_text) <= max_chars:
+        return transcript_text
+
+    lines = transcript_text.split("\n")
+    total_lines = len(lines)
+
+    # Keep first 20% and last 20% of lines.
+    head_count = max(1, total_lines // 5)
+    tail_count = max(1, total_lines // 5)
+
+    head_lines = lines[:head_count]
+    tail_lines = lines[-tail_count:]
+    middle_lines = lines[head_count:-tail_count] if tail_count < total_lines else []
+
+    # Fill middle with evenly spaced lines.
+    remaining = max_chars - len("\n".join(head_lines + tail_lines)) - 20  # 20 for separators
+    if remaining > 0 and middle_lines:
+        # Sample ~1 line per 80 chars of remaining budget.
+        sample_count = min(len(middle_lines), remaining // 80)
+        step = max(1, len(middle_lines) // sample_count) if sample_count > 0 else 1
+        middle_sample = middle_lines[::step][:sample_count]
+    else:
+        middle_sample = []
+
+    parts = head_lines
+    if middle_sample:
+        parts.append("[...]")
+        parts.extend(middle_sample)
+        parts.append("[...]")
+    parts.extend(tail_lines)
+
+    result = "\n".join(parts)
+    return result[:max_chars] if len(result) > max_chars else result
+
+
 _SENTENCE_END = (".", "!", "?", "…", '"', "\u201d")
+
+# Groq free tier: 8000 TPM. ~1 token per 4 chars. Keep under 6000 chars (~1500 tokens).
+MAX_TRANSCRIPT_CHARS = 6000
 
 
 def _ends_sentence(text: str) -> bool:
@@ -403,7 +448,9 @@ def find_segments(
 
     # Step 1: Classify content type and density (one LLM call).
     try:
-        content_type, density = _classify_content(transcript_text, video_title)
+        # Truncate for Groq free-tier token limits.
+        classify_text = _truncate_transcript(transcript_text, max_chars=2000)
+        content_type, density = _classify_content(classify_text, video_title)
         print(f"  -> Content type: {content_type} | density: {density}")
     except Exception:
         content_type, density = "other", "medium"
@@ -435,6 +482,9 @@ def find_segments(
             chunk_text = transcript_text
             chunk_start = 0.0
             chunk_end = total
+
+        # Truncate to fit Groq free-tier token limits.
+        chunk_text = _truncate_transcript(chunk_text)
 
         prompt = _build_virality_prompt(
             transcript_text=chunk_text,
