@@ -162,6 +162,14 @@ PAGE = """
                     Source: <a href="{{ s.source_url }}" target="_blank" rel="noopener">{{ s.source_title[:48] }}</a>
                     &middot; {{ '%.0f'|format(s.seg_start) }}s–{{ '%.0f'|format(s.seg_end) }}s
                   </div>
+                  {% if s.score %}
+                  <div style="font-size:12px; color:var(--muted);">
+                    Score: <b style="color:var(--accent);">{{ '%.0f'|format(s.score) }}</b>/100
+                    {% if s.virality_signals %}
+                      &middot; {{ s.virality_signals|join(', ') }}
+                    {% endif %}
+                  </div>
+                  {% endif %}
                   <div class="row">
                     <button class="btn-save" type="submit">Save edits</button>
                   </div>

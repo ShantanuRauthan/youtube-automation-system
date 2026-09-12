@@ -47,6 +47,11 @@ class Config:
     client_secret_file: str = field(default_factory=lambda: os.getenv("CLIENT_SECRET_FILE", "client_secret.json"))
     token_file: str = field(default_factory=lambda: os.getenv("TOKEN_FILE", "token.json"))
 
+    # Optional explicit path to an ffmpeg binary (bypasses PATH lookup). Useful
+    # if the ffmpeg on your PATH was built without libass/drawtext and you
+    # installed a full static build elsewhere. Empty = find "ffmpeg" on PATH.
+    ffmpeg_binary: str = field(default_factory=lambda: os.getenv("FFMPEG_BINARY", "").strip())
+
     # AI provider
     ai_provider: str = field(default_factory=lambda: os.getenv("AI_PROVIDER", "gemini").strip().lower())
     gemini_api_key: str = field(default_factory=lambda: os.getenv("GEMINI_API_KEY", ""))
@@ -70,8 +75,34 @@ class Config:
     exclude_music: bool = field(default_factory=lambda: _get_bool("EXCLUDE_MUSIC", True))
     min_short_seconds: int = field(default_factory=lambda: _get_int("MIN_SHORT_SECONDS", 15))
     max_short_seconds: int = field(default_factory=lambda: _get_int("MAX_SHORT_SECONDS", 60))
+    # Snap AI-chosen cut points to real transcript boundaries so clips start and
+    # end on complete sentences instead of mid-word. CLIP_TAIL_PAD adds a little
+    # breathing room (seconds) after the last word so speech isn't clipped.
+    snap_to_sentences: bool = field(default_factory=lambda: _get_bool("SNAP_TO_SENTENCES", True))
+    clip_tail_pad: float = field(default_factory=lambda: float(os.getenv("CLIP_TAIL_PAD", "0.4")))
     max_source_seconds: int = field(default_factory=lambda: _get_int("MAX_SOURCE_SECONDS", 1800))
+    # Only clip from source videos at least this long. Taking a 30-60s Short from
+    # a short video is a near-1:1 repost (least transformative, highest claim
+    # risk); requiring a longer source means the Short is genuinely a small
+    # excerpt. Set to 0 to disable the floor. NOTE: not applied to a person/
+    # channel search — there you explicitly asked for THAT channel's videos.
+    min_source_seconds: int = field(default_factory=lambda: _get_int("MIN_SOURCE_SECONDS", 120))
     output_dir: str = field(default_factory=lambda: os.getenv("OUTPUT_DIR", "output"))
+
+    # Sourcing: how source videos are picked.
+    #   relevance = topical match, then most views (default, safest)
+    #   views     = same as relevance (explicit alias)
+    #   trending  = recent uploads, then highest view velocity (fast-rising)
+    source_mode: str = field(default_factory=lambda: os.getenv("SOURCE_MODE", "relevance").strip().lower())
+    search_pool: int = field(default_factory=lambda: _get_int("SEARCH_POOL", 50))
+
+    # Thumbnails & packaging: grab a frame + overlay the AI hook, then set it as
+    # the video's custom thumbnail on upload (needs a phone-verified channel).
+    generate_thumbnail: bool = field(default_factory=lambda: _get_bool("THUMBNAILS", True))
+    set_thumbnail_on_upload: bool = field(default_factory=lambda: _get_bool("SET_THUMBNAIL", True))
+
+    # Analytics feedback loop: bias future runs toward what has performed best.
+    learn_from_analytics: bool = field(default_factory=lambda: _get_bool("LEARN", True))
 
     # Branding / transformation (helps make Shorts transformative, not a Content ID bypass)
     brand_handle: str = field(default_factory=lambda: os.getenv("BRAND_HANDLE", "").strip())
@@ -87,6 +118,32 @@ class Config:
     keyword_zoom: bool = field(default_factory=lambda: _get_bool("KEYWORD_ZOOM", True))
     keyword_zoom_intensity: float = field(default_factory=lambda: float(os.getenv("KEYWORD_ZOOM_INTENSITY", "0.12")))
 
+    # Face tracking: use OpenCV Haar cascade to detect and follow the speaker,
+    # centering the vertical crop on them instead of just center-cropping.
+    face_tracking: bool = field(default_factory=lambda: _get_bool("FACE_TRACKING", True))
+    face_tracking_smoothing: float = field(default_factory=lambda: float(os.getenv("FACE_TRACKING_SMOOTHING", "0.15")))
+
+    # Audio polish: fade the audio out over the last AUDIO_FADE_OUT seconds of
+    # each Short (smoother endings), and optionally lay a royalty-free music bed
+    # quietly under the clip (looped to fill the duration). Point MUSIC_BED at a
+    # local audio file; MUSIC_VOLUME is 0..1 (kept low so speech stays clear).
+    audio_fade_out: float = field(default_factory=lambda: float(os.getenv("AUDIO_FADE_OUT", "0.4")))
+    music_bed: str = field(default_factory=lambda: os.getenv("MUSIC_BED", "").strip())
+    music_volume: float = field(default_factory=lambda: float(os.getenv("MUSIC_VOLUME", "0.08")))
+
+    # Discovery: auto-pick a trending, low-competition topic instead of choosing
+    # a category by hand. Uses YouTube trending + (optionally) Google Trends.
+    discovery_region: str = field(default_factory=lambda: os.getenv("DISCOVERY_REGION", "US").strip())
+    discovery_pool: int = field(default_factory=lambda: _get_int("DISCOVERY_POOL", 40))
+    discovery_use_trends: bool = field(default_factory=lambda: _get_bool("DISCOVERY_USE_TRENDS", True))
+    # Caption rendering strategy. FFmpeg's `subtitles` filter needs libass, and
+    # some builds ship without it (captions get silently skipped). This controls
+    # the fallback:
+    #   auto      = use FFmpeg `subtitles` if available, else render with Pillow
+    #   subtitles = force FFmpeg `subtitles` (skip captions if libass is missing)
+    #   pillow    = always render captions as Pillow PNG overlays (no libass needed)
+    caption_mode: str = field(default_factory=lambda: os.getenv("CAPTION_MODE", "auto").strip().lower())
+
     # State / review workflow.
     #   review_mode = produce Shorts as "pending review" and DON'T auto-upload;
     #                 approve + upload them from the dashboard (python dashboard.py).
@@ -96,13 +153,24 @@ class Config:
     dedup: bool = field(default_factory=lambda: _get_bool("DEDUP", True))
     dashboard_port: int = field(default_factory=lambda: _get_int("DASHBOARD_PORT", 5000))
 
+    # Long-video chunking: split transcripts >30min into overlapping windows
+    # so the LLM never processes an entire 3-hour transcript at once.
+    chunk_minutes: int = field(default_factory=lambda: _get_int("CHUNK_MINUTES", 20))
+    chunk_overlap_seconds: int = field(default_factory=lambda: _get_int("CHUNK_OVERLAP_SECONDS", 60))
+
     # Voiceover commentary (the biggest transformative-use win).
     #   off  = no voiceover (default)
     #   ai   = AI writes a script, TTS speaks it
     #   file = use your own recording at VOICEOVER_FILE for every Short
     voiceover_mode: str = field(default_factory=lambda: os.getenv("VOICEOVER_MODE", "off").strip().lower())
-    voiceover_engine: str = field(default_factory=lambda: os.getenv("VOICEOVER_ENGINE", "edge").strip().lower())
+    # Engine choices:
+    #   kokoro = fully offline, 28 voices, recommended (default)
+    #   edge   = Microsoft neural voices, needs internet
+    #   piper  = offline, needs a .onnx voice model
+    voiceover_engine: str = field(default_factory=lambda: os.getenv("VOICEOVER_ENGINE", "kokoro").strip().lower())
     voiceover_voice: str = field(default_factory=lambda: os.getenv("VOICEOVER_VOICE", "en-US-AndrewMultilingualNeural").strip())
+    # Kokoro voice names: af_heart, af_alloy, af_bella, am_adam, am_echo, etc.
+    kokoro_voice: str = field(default_factory=lambda: os.getenv("KOKORO_VOICE", "af_heart").strip())
     voiceover_file: str = field(default_factory=lambda: os.getenv("VOICEOVER_FILE", "").strip())
     piper_model: str = field(default_factory=lambda: os.getenv("PIPER_MODEL", "").strip())
     duck_volume: float = field(default_factory=lambda: float(os.getenv("DUCK_VOLUME", "0.15")))
@@ -125,10 +193,14 @@ class Config:
             )
         if self.upload_privacy not in {"private", "unlisted", "public"}:
             problems.append("UPLOAD_PRIVACY must be private, unlisted, or public.")
+        if self.source_mode not in {"relevance", "views", "trending"}:
+            problems.append("SOURCE_MODE must be relevance, views, or trending.")
+        if self.caption_mode not in {"auto", "subtitles", "pillow"}:
+            problems.append("CAPTION_MODE must be auto, subtitles, or pillow.")
         if self.voiceover_mode not in {"off", "ai", "file"}:
             problems.append("VOICEOVER_MODE must be off, ai, or file.")
-        if self.voiceover_engine not in {"edge", "piper"}:
-            problems.append("VOICEOVER_ENGINE must be edge or piper.")
+        if self.voiceover_engine not in {"kokoro", "edge", "piper"}:
+            problems.append("VOICEOVER_ENGINE must be kokoro, edge, or piper.")
         if self.voiceover_mode == "file" and not os.path.exists(self.voiceover_file):
             problems.append(
                 f"VOICEOVER_MODE=file but VOICEOVER_FILE '{self.voiceover_file}' was not found."

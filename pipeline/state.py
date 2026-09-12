@@ -87,8 +87,34 @@ def init_db() -> None:
 
             CREATE INDEX IF NOT EXISTS idx_shorts_video  ON shorts(source_video_id);
             CREATE INDEX IF NOT EXISTS idx_shorts_status ON shorts(status);
+
+            CREATE TABLE IF NOT EXISTS metrics (
+                id          INTEGER PRIMARY KEY AUTOINCREMENT,
+                short_id    INTEGER,
+                youtube_id  TEXT,
+                views       INTEGER DEFAULT 0,
+                likes       INTEGER DEFAULT 0,
+                comments    INTEGER DEFAULT 0,
+                fetched_at  REAL
+            );
+            CREATE INDEX IF NOT EXISTS idx_metrics_short ON metrics(short_id);
             """
         )
+    _migrate()
+
+
+def _migrate() -> None:
+    """Add columns introduced after the first release. Safe to run every time."""
+    with _conn() as c:
+        cols = {r["name"] for r in c.execute("PRAGMA table_info(shorts)").fetchall()}
+        if "category" not in cols:
+            c.execute("ALTER TABLE shorts ADD COLUMN category TEXT")
+        if "thumbnail" not in cols:
+            c.execute("ALTER TABLE shorts ADD COLUMN thumbnail TEXT")
+        if "score" not in cols:
+            c.execute("ALTER TABLE shorts ADD COLUMN score REAL DEFAULT 50.0")
+        if "virality_signals" not in cols:
+            c.execute("ALTER TABLE shorts ADD COLUMN virality_signals TEXT DEFAULT '[]'")
 
 
 # --------------------------------------------------------------------------- #
@@ -114,19 +140,22 @@ def finish_run(run_id: int, produced: int, status: str = "done") -> None:
 # --------------------------------------------------------------------------- #
 #  Dedup
 # --------------------------------------------------------------------------- #
-def segment_overlaps(video_id: str, start: float, end: float) -> bool:
-    """True if we've already produced a (non-rejected) Short overlapping this
-    time window of this source video. Rejected Shorts don't block re-use."""
+def segment_overlaps(video_id: str, start: float, end: float) -> tuple[bool, float]:
+    """Check if a segment overlaps any existing (non-rejected) Short.
+
+    Returns (overlaps, existing_score). If overlapping, the existing score
+    lets the caller decide whether to skip or replace.
+    """
     with _conn() as c:
         rows = c.execute(
-            "SELECT seg_start, seg_end FROM shorts "
+            "SELECT seg_start, seg_end, score FROM shorts "
             "WHERE source_video_id = ? AND status != ?",
             (video_id, REJECTED),
         ).fetchall()
     for r in rows:
         if not (end <= r["seg_start"] or start >= r["seg_end"]):
-            return True
-    return False
+            return True, float(r["score"] or 50.0)
+    return False, 0.0
 
 
 def video_used_count(video_id: str) -> int:
@@ -158,6 +187,10 @@ def record_short(
     hook: str,
     status: str,
     youtube_id: Optional[str] = None,
+    category: str = "",
+    thumbnail: str = "",
+    score: float = 50.0,
+    virality_signals: list[str] | None = None,
 ) -> int:
     with _conn() as c:
         cur = c.execute(
@@ -165,14 +198,16 @@ def record_short(
             INSERT INTO shorts (
                 run_id, source_video_id, source_url, source_title,
                 seg_start, seg_end, file, title, description, tags, hashtags,
-                category_id, hook, status, youtube_id, created_at
-            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                category_id, category, hook, status, youtube_id, thumbnail,
+                score, virality_signals, created_at
+            ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
             """,
             (
                 run_id, source_video_id, source_url, source_title,
                 seg_start, seg_end, file, title, description,
                 json.dumps(tags), json.dumps(hashtags),
-                category_id, hook, status, youtube_id, time.time(),
+                category_id, category, hook, status, youtube_id, thumbnail,
+                score, json.dumps(virality_signals or []), time.time(),
             ),
         )
         return int(cur.lastrowid)
@@ -197,6 +232,10 @@ def _row_to_dict(row: sqlite3.Row) -> dict:
             d[key] = json.loads(d.get(key) or "[]")
         except (TypeError, ValueError):
             d[key] = []
+    try:
+        d["virality_signals"] = json.loads(d.get("virality_signals") or "[]")
+    except (TypeError, ValueError):
+        d["virality_signals"] = []
     return d
 
 
@@ -223,3 +262,78 @@ def counts_by_status() -> dict[str, int]:
             "SELECT status, COUNT(*) AS n FROM shorts GROUP BY status"
         ).fetchall()
     return {r["status"]: int(r["n"]) for r in rows}
+
+
+# --------------------------------------------------------------------------- #
+#  Analytics / learning
+# --------------------------------------------------------------------------- #
+def record_metrics(*, short_id: int, youtube_id: str, views: int, likes: int, comments: int) -> None:
+    """Append a metrics snapshot for a Short (we keep history, newest wins)."""
+    with _conn() as c:
+        c.execute(
+            "INSERT INTO metrics (short_id, youtube_id, views, likes, comments, fetched_at) "
+            "VALUES (?,?,?,?,?,?)",
+            (short_id, youtube_id, views, likes, comments, time.time()),
+        )
+
+
+def performance_rows() -> list[dict]:
+    """Each uploaded Short joined with its LATEST metrics snapshot, best first."""
+    with _conn() as c:
+        rows = c.execute(
+            """
+            SELECT s.title AS title,
+                   s.category AS category,
+                   (s.seg_end - s.seg_start) AS duration,
+                   m.views AS views, m.likes AS likes, m.comments AS comments
+            FROM shorts s
+            JOIN metrics m ON m.short_id = s.id
+            JOIN (
+                SELECT short_id, MAX(fetched_at) AS mx FROM metrics GROUP BY short_id
+            ) latest ON latest.short_id = m.short_id AND latest.mx = m.fetched_at
+            ORDER BY m.views DESC
+            """
+        ).fetchall()
+    out: list[dict] = []
+    for r in rows:
+        d = dict(r)
+        d["views"] = int(d.get("views") or 0)
+        d["likes"] = int(d.get("likes") or 0)
+        d["comments"] = int(d.get("comments") or 0)
+        d["duration"] = float(d.get("duration") or 0.0)
+        out.append(d)
+    return out
+
+
+def performance_hint() -> str:
+    """A short natural-language signal (best length bucket + best category)."""
+    rows = performance_rows()
+    if len(rows) < 3:
+        return ""  # not enough data to learn from yet
+
+    buckets: dict[str, list[int]] = {"15-25s": [], "25-40s": [], "40-60s": []}
+    cats: dict[str, list[int]] = {}
+    for r in rows:
+        d, v = r["duration"], r["views"]
+        if d < 25:
+            buckets["15-25s"].append(v)
+        elif d < 40:
+            buckets["25-40s"].append(v)
+        else:
+            buckets["40-60s"].append(v)
+        if r["category"]:
+            cats.setdefault(r["category"], []).append(v)
+
+    def avg(vals: list[int]) -> float:
+        return sum(vals) / len(vals) if vals else 0.0
+
+    parts: list[str] = []
+    filled = {b: vs for b, vs in buckets.items() if vs}
+    if filled:
+        best_bucket = max(filled, key=lambda b: avg(filled[b]))
+        parts.append(f"{best_bucket} clips have averaged the most views")
+    if cats:
+        best_cat = max(cats, key=lambda c: avg(cats[c]))
+        parts.append(f"the '{best_cat}' category performs best")
+
+    return ("; ".join(parts) + ".") if parts else ""

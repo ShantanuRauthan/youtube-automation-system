@@ -11,15 +11,32 @@ google-auth-httplib2>=0.2.0
 youtube-transcript-api>=0.6.2
 yt-dlp>=2024.8.6
 
-# AI provider (Gemini free tier). Ollama uses plain HTTP, no extra dep.
+# AI provider (Groq recommended, Gemini free tier, Ollama local).
+# Groq: free, fast, high limits — get a key at https://console.groq.com/keys
+# Gemini: free tier with lower limits
+# Ollama: fully local, no API key needed
 google-generativeai>=0.7.2
 
 # Local review dashboard (python dashboard.py).
 Flask>=3.0.0
 
-# Free AI voiceover (Microsoft neural voices, no API key). Offline "piper"
-# engine is optional: pip install piper-tts and set PIPER_MODEL.
+# Thumbnail generation: overlay the AI hook text onto a grabbed frame.
+Pillow>=10.3.0
+
+# Optional Google Trends demand signal for Discovery (auto-pick a topic).
+# Unofficial API; Discovery degrades to YouTube-only signals if it errors.
+pytrends>=4.9.2
+
+# Free AI voiceover — three engines, all free:
+#   kokoro (RECOMMENDED): fully offline, 28 English voices, no API key
+#   edge: Microsoft neural voices, needs internet but no API key
+#   piper: fully offline, needs a .onnx voice model
+kokoro>=0.8.0
+numpy>=1.24.0
 edge-tts>=6.1.9
+
+# Face-tracking vertical crop (Phase 4): smart crop centered on speaker.
+opencv-python>=4.8.0
 
 # Optional local speech-to-text fallback for videos with NO YouTube captions
 # (e.g. music/dance clips). Install ONE of these manually:

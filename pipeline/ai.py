@@ -2,7 +2,6 @@
 
 Supports:
   - "gemini": Google Gemini free tier (needs GEMINI_API_KEY, no cost).
-  - "groq":   free hosted open-source Llama models (needs GROQ_API_KEY, no cost).
   - "ollama": fully local + offline models via the Ollama server (no cost).
 
 Both expose a single `generate_json` helper that returns parsed JSON, and a
@@ -129,18 +128,18 @@ def _gemini_generate(prompt: str) -> str:
                         raise AIError(
                             "Gemini free-tier DAILY quota exhausted (about 20 requests/day). "
                             "This resets in ~24h and cannot be fixed by retrying. Your best options:\n"
-                            "  1. Switch to Groq (free, much higher limits): set AI_PROVIDER=groq in .env "
-                            "and add GROQ_API_KEY (https://console.groq.com/keys).\n"
-                            "  2. Switch to a fully-offline local model: set AI_PROVIDER=ollama in .env "
-                            "(install from https://ollama.com, run `ollama pull llama3.1`, then `ollama serve`).\n"
-                            "  3. Wait for the daily quota to reset, then re-run."
+                            "  1. Switch to a fully-offline local model: set AI_PROVIDER=ollama in .env "
+                            "(install from https://ollama.com, run `ollama pull llama3.1`, then `ollama serve`). "
+                            "This is unlimited and free.\n"
+                            "  2. Wait for the daily quota to reset, then re-run.\n"
+                            "  3. Enable billing on your Google AI Studio key for higher limits."
                         ) from exc
                     attempts += 1
                     if attempts > max_retries:
                         raise AIError(
                             "Gemini free-tier per-minute quota exhausted (5 requests/minute). "
-                            "Wait a minute and re-run, set AI_PROVIDER=groq or AI_PROVIDER=ollama in .env, "
-                            "or raise GEMINI_MAX_RETRIES. "
+                            "Wait a minute and re-run, set AI_PROVIDER=ollama in .env for "
+                            "unlimited offline use, or raise GEMINI_MAX_RETRIES. "
                             f"Original error: {exc}"
                         ) from exc
                     delay = _parse_retry_delay(str(exc))

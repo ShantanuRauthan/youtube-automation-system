@@ -8,9 +8,10 @@ reupload. Three modes (set VOICEOVER_MODE in .env):
   ai   -> the AI writes a short commentary script, then TTS speaks it
   file -> use your own recording (VOICEOVER_FILE) for every Short
 
-For AI voice, two free engines are supported (VOICEOVER_ENGINE):
-  edge  -> edge-tts, Microsoft neural voices, free, no API key (needs internet)
-  piper -> fully offline local voices (needs PIPER_MODEL, a .onnx voice file)
+For AI voice, three free engines are supported (VOICEOVER_ENGINE):
+  kokoro -> fully offline, 28 English voices, no API key (RECOMMENDED)
+  edge   -> edge-tts, Microsoft neural voices, free, no API key (needs internet)
+  piper  -> fully offline local voices (needs PIPER_MODEL, a .onnx voice file)
 
 Nothing here defeats YouTube Content ID. It makes the Short genuinely
 transformative, which is what actually protects you from claims.
@@ -56,6 +57,71 @@ Return just the spoken words as plain text."""
     return text or hook
 
 
+# --------------------------------------------------------------------------- #
+#  Kokoro TTS (fully offline, 28 English voices, recommended)
+# --------------------------------------------------------------------------- #
+def _synthesize_kokoro(text: str, out_path: str) -> str:
+    """Synthesize speech using Kokoro (local ONNX model, no API key).
+
+    Requires: pip install kokoro
+    Model downloads automatically on first use (~82MB).
+    """
+    try:
+        from kokoro import KPipeline
+    except ImportError as exc:
+        raise AIError(
+            "kokoro is not installed. Run: pip install kokoro\n"
+            "Kokoro is fully offline, free, and has 28 English voices."
+        ) from exc
+
+    pipeline = KPipeline(lang_code="a")  # "a" = American English
+    voice = getattr(config, "kokoro_voice", "af_heart")
+
+    # Kokoro generates audio in segments; concatenate to a single WAV.
+    import io
+    import wave
+
+    all_audio = []
+    for _, _, audio in pipeline(text, voice=voice, speed=1.0):
+        all_audio.append(audio)
+
+    if not all_audio:
+        raise AIError("Kokoro returned no audio")
+
+    import numpy as np
+    combined = np.concatenate(all_audio)
+
+    # Save as WAV (16-bit PCM, 24kHz — Kokoro's native rate).
+    wav_path = out_path if out_path.endswith(".wav") else out_path.rsplit(".", 1)[0] + ".wav"
+    with wave.open(wav_path, "wb") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(24000)
+        wf.writeframes((combined * 32767).astype(np.int16).tobytes())
+
+    # Convert WAV to MP3 for consistency with other engines.
+    if not out_path.endswith(".wav"):
+        try:
+            subprocess.run(
+                ["ffmpeg", "-y", "-i", wav_path, "-b:a", "128k", out_path],
+                capture_output=True, text=True, timeout=30,
+            )
+            if out_path != wav_path:
+                import os
+                try:
+                    os.remove(wav_path)
+                except OSError:
+                    pass
+        except (subprocess.SubprocessError, FileNotFoundError):
+            # FFmpeg not found or failed — return the WAV instead.
+            return wav_path
+
+    return out_path
+
+
+# --------------------------------------------------------------------------- #
+#  Edge TTS (needs internet, Microsoft neural voices)
+# --------------------------------------------------------------------------- #
 def _synthesize_edge(text: str, out_path: str) -> str:
     try:
         import edge_tts  # noqa: WPS433
@@ -70,6 +136,9 @@ def _synthesize_edge(text: str, out_path: str) -> str:
     return out_path
 
 
+# --------------------------------------------------------------------------- #
+#  Piper TTS (offline, needs .onnx model)
+# --------------------------------------------------------------------------- #
 def _synthesize_piper(text: str, out_path: str) -> str:
     if shutil.which("piper") is None:
         raise AIError(
@@ -87,6 +156,9 @@ def _synthesize_piper(text: str, out_path: str) -> str:
     return out_path
 
 
+# --------------------------------------------------------------------------- #
+#  Public entry point
+# --------------------------------------------------------------------------- #
 def get_voiceover(
     *,
     hook: str,
@@ -117,8 +189,11 @@ def get_voiceover(
     if not script:
         return "", ""
 
+    engine = config.voiceover_engine
     try:
-        if config.voiceover_engine == "piper":
+        if engine == "kokoro":
+            audio = _synthesize_kokoro(script, out_path)
+        elif engine == "piper":
             audio = _synthesize_piper(script, out_path)
         else:
             audio = _synthesize_edge(script, out_path)

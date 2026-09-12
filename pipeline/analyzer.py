@@ -1,8 +1,29 @@
-"""Use AI to find the most interesting, self-contained segments in a transcript."""
+"""Use AI to find the most interesting, self-contained segments in a transcript.
+
+Each candidate gets a viral-potential ``score`` so we can rank multiple moments
+from the same video and keep the strongest ones. An optional ``perf_hint`` from
+the analytics feedback loop nudges the model toward the lengths/styles that have
+actually performed best on your channel.
+
+Highlight selection uses an 8-signal virality framework inspired by professional
+short-form editors:
+
+1. Hook moments — immediate curiosity in the first 3 seconds
+2. Emotional peaks — surprise, laughter, anger, vulnerability
+3. Opinion bombs — polarizing/counter-intuitive statements
+4. Revelation moments — surprising facts, stats, confessions
+5. Conflict/tension — disagreements, stakes, drama
+6. Quotable one-liners — memorable, shareable phrases
+7. Story peaks — climax, twist, resolution
+8. Practical value — actionable tips, how-to insights
+
+Content type is detected first (podcast, interview, tutorial, etc.) so the
+highlight prompt can be tailored to the video's style.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from config import config
 from pipeline.ai import generate_json
@@ -15,11 +36,127 @@ class Segment:
     end: float
     reason: str
     hook: str  # short punchy line describing why it's compelling
+    score: float = 50.0  # 0-100 viral potential, used for ranking
+    virality_signals: list[str] = field(default_factory=list)  # which signals were detected
 
     @property
     def duration(self) -> float:
         return self.end - self.start
 
+
+# --------------------------------------------------------------------------- #
+#  Content type detection
+# --------------------------------------------------------------------------- #
+
+# Content type -> guidance for the highlight prompt. This lets the model focus
+# on the right kind of moment for each style of video.
+_CONTENT_TYPE_GUIDANCE: dict[str, str] = {
+    "podcast": (
+        "Focus on quotable moments, surprising confessions, emotional peaks, "
+        "and strong opinions. Podcasts thrive on personality-driven clips."
+    ),
+    "interview": (
+        "Focus on revealing answers, surprising facts, emotional reactions, "
+        "and counter-intuitive statements. The best interview clips are moments "
+        "the guest says something unexpected."
+    ),
+    "tutorial": (
+        "Focus on practical tips, 'aha' moments, counter-intuitive facts, "
+        "and actionable advice. Viewers share clips that teach them something."
+    ),
+    "lecture": (
+        "Focus on surprising facts, mind-blowing stats, simple explanations "
+        "of complex topics, and quotable one-liners from the lecturer."
+    ),
+    "commentary": (
+        "Focus on opinion bombs, strong takes, controversial statements, "
+        "and emotional reactions. Commentary clips thrive on polarization."
+    ),
+    "debate": (
+        "Focus on tension, counter-arguments, 'destroyed' moments, and "
+        "emotional peaks. Debates thrive on conflict and drama."
+    ),
+    "vlog": (
+        "Focus on emotional peaks, funny moments, surprising events, "
+        "and relatable situations. Vlogs thrive on authenticity."
+    ),
+    "other": (
+        "Focus on the strongest hook, surprising facts, emotional peaks, "
+        "and quotable moments. Use general virality signals."
+    ),
+}
+
+_DENSITY_GUIDANCE: dict[str, str] = {
+    "low": (
+        "This video has low information density — there are long pauses or "
+        "filler. Focus on the few concentrated moments of value."
+    ),
+    "medium": (
+        "This video has moderate information density. Pick the peak moments."
+    ),
+    "high": (
+        "This video is densely packed with information. There are many "
+        "potential clips — be selective and pick only the absolute strongest."
+    ),
+}
+
+
+def _classify_content(transcript_text: str, video_title: str) -> tuple[str, str]:
+    """Classify video content type and information density via a single LLM call.
+
+    Returns (content_type, density) where content_type is one of:
+    podcast, interview, tutorial, lecture, commentary, debate, vlog, other
+    and density is one of: low, medium, high
+    """
+    truncated = transcript_text[:2500]
+    prompt = f"""You are a content analyst. Classify this YouTube video based on its
+title and the beginning of its transcript.
+
+Title: "{video_title}"
+Transcript (first ~2500 chars):
+\"\"\"
+{truncated}
+\"\"\"
+
+Return a JSON object with exactly these keys:
+{{
+  "content_type": "<one of: podcast, interview, tutorial, lecture, commentary, debate, vlog, other>",
+  "density": "<one of: low, medium, high>",
+  "reason": "<one sentence explaining the classification>"
+}}
+
+Rules:
+- "podcast" = conversational, multi-person, long-form discussion
+- "interview" = Q&A format, one person asking questions
+- "tutorial" = step-by-step how-to, screen recording, demonstration
+- "lecture" = single speaker teaching a topic (classroom style)
+- "commentary" = one person giving opinions on a topic/news/event
+- "debate" = two+ people arguing opposing views
+- "vlog" = personal life content, daily routine, travel
+- "other" = doesn't fit the above categories
+- density is about how much useful content per minute (low = lots of filler, high = packed with value)"""
+
+    data = generate_json(prompt)
+    if not isinstance(data, dict):
+        return "other", "medium"
+
+    content_type = str(data.get("content_type", "other")).lower().strip()
+    density = str(data.get("density", "medium")).lower().strip()
+
+    valid_types = {"podcast", "interview", "tutorial", "lecture", "commentary", "debate", "vlog", "other"}
+    valid_density = {"low", "medium", "high"}
+
+    if content_type not in valid_types:
+        content_type = "other"
+    if density not in valid_density:
+        density = "medium"
+
+    return content_type, density
+
+
+# --------------------------------------------------------------------------- #
+#  Transcript formatting
+# --------------------------------------------------------------------------- #
 
 def _format_transcript(transcript: list[TranscriptSegment]) -> str:
     """Compact '[mm:ss] text' lines to keep the prompt small."""
@@ -30,65 +167,342 @@ def _format_transcript(transcript: list[TranscriptSegment]) -> str:
     return "\n".join(lines)
 
 
-def find_segments(transcript: list[TranscriptSegment], video_title: str) -> list[Segment]:
+_SENTENCE_END = (".", "!", "?", "…", '"', "\u201d")
+
+
+def _ends_sentence(text: str) -> bool:
+    return text.rstrip().endswith(_SENTENCE_END)
+
+
+def _snap_to_sentences(
+    start: float,
+    end: float,
+    transcript: list[TranscriptSegment],
+    total: float,
+) -> tuple[float, float]:
+    """Move the AI's rough start/end to real transcript boundaries so the clip
+    begins and ends on a complete sentence instead of mid-word.
+
+    - Start snaps back to the beginning of the caption line it falls in, then
+      walks further back while the previous line does NOT end a sentence (i.e.
+      we're mid-sentence), so we capture the whole sentence opening.
+    - End snaps forward to the end of the caption line it falls in, then extends
+      to the next line that ends on sentence punctuation, as long as we stay
+      under the max length. A small tail pad keeps the final word from clipping.
+    """
     if not transcript:
-        return []
+        return start, end
 
-    transcript_text = _format_transcript(transcript)
-    total = transcript[-1].end
+    min_len = float(config.min_short_seconds)
+    max_len = float(config.max_short_seconds)
+    n = len(transcript)
 
-    prompt = f"""You are a viral short-form video editor. Below is a timestamped transcript
-of a YouTube video titled "{video_title}" (total length {int(total)} seconds).
+    # ---- snap START to a sentence beginning ----
+    start_idx = 0
+    for i, t in enumerate(transcript):
+        if t.end > start:
+            start_idx = i
+            break
+    # walk back while the previous line didn't finish a sentence
+    while start_idx > 0 and not _ends_sentence(transcript[start_idx - 1].text):
+        # don't run away past the max clip length
+        if end - transcript[start_idx - 1].start > max_len:
+            break
+        start_idx -= 1
+    snapped_start = max(0.0, transcript[start_idx].start)
 
-Find the {config.shorts_per_video} MOST engaging, self-contained moment(s) that would
-work as a standalone vertical Short. Each moment must:
-- Be between {config.min_short_seconds} and {config.max_short_seconds} seconds long.
+    # ---- snap END to a sentence ending ----
+    end_idx = start_idx
+    for i in range(start_idx, n):
+        if transcript[i].start < end:
+            end_idx = i
+        else:
+            break
+    # extend forward to the next line that ends a sentence, within max length
+    while end_idx < n - 1 and not _ends_sentence(transcript[end_idx].text):
+        if transcript[end_idx + 1].end - snapped_start > max_len:
+            break
+        end_idx += 1
+    snapped_end = transcript[end_idx].end
+
+    # ---- enforce length using whole lines where possible ----
+    # too short: keep adding following lines until we hit the minimum
+    while snapped_end - snapped_start < min_len and end_idx < n - 1:
+        if transcript[end_idx + 1].end - snapped_start > max_len:
+            break
+        end_idx += 1
+        snapped_end = transcript[end_idx].end
+
+    # too long: trim whole lines off the end until within the maximum
+    while snapped_end - snapped_start > max_len and end_idx > start_idx:
+        end_idx -= 1
+        snapped_end = transcript[end_idx].end
+
+    # small breathing room so the last word isn't cut, but never past the video
+    snapped_end = min(total, snapped_end + config.clip_tail_pad)
+
+    if snapped_end <= snapped_start:
+        return start, end
+    return snapped_start, snapped_end
+
+
+# --------------------------------------------------------------------------- #
+#  Virality scoring prompt
+# --------------------------------------------------------------------------- #
+
+def _build_virality_prompt(
+    transcript_text: str,
+    video_title: str,
+    total_seconds: int,
+    shorts_count: int,
+    min_seconds: int,
+    max_seconds: int,
+    content_type: str,
+    density: str,
+    hint_line: str,
+) -> str:
+    """Build the AI prompt with 8-signal virality framework + content-type guidance."""
+    content_guidance = _CONTENT_TYPE_GUIDANCE.get(content_type, _CONTENT_TYPE_GUIDANCE["other"])
+    density_guidance = _DENSITY_GUIDANCE.get(density, _DENSITY_GUIDANCE["medium"])
+
+    return f"""You are a viral short-form video editor with years of experience picking
+the perfect moments from long-form content. Below is a timestamped transcript
+of a YouTube video titled "{video_title}" (total length {total_seconds} seconds).
+
+CONTENT ANALYSIS:
+- Type: {content_type}
+- Information density: {density}
+- Content guidance: {content_guidance}
+- Density guidance: {density_guidance}
+{hint_line}
+YOUR TASK:
+Find the {shorts_count} MOST viral, self-contained moment(s) that would work as a
+standalone vertical Short (TikTok, Reels, YouTube Shorts).
+
+SCORING FRAMEWORK (8 Virality Signals):
+Score each candidate 0-100 based on how many of these signals it hits:
+1. HOOK — Does it grab attention in the first 3 seconds? (+15 points)
+2. EMOTIONAL PEAK — Does it trigger surprise, laughter, anger, or empathy? (+15 points)
+3. OPINION BOMB — Is it polarizing, counter-intuitive, or controversial? (+12 points)
+4. REVELATION — Does it reveal a surprising fact, stat, or confession? (+12 points)
+5. CONFLICT — Is there tension, disagreement, or stakes? (+10 points)
+6. QUOTABLE — Is there a memorable one-liner people would share? (+10 points)
+7. STORY PEAK — Is there a climax, twist, or resolution? (+10 points)
+8. PRACTICAL VALUE — Does it teach something actionable? (+6 points)
+
+CONSTRAINTS:
+- Each clip must be between {min_seconds} and {max_seconds} seconds.
 - Start and end on a complete thought (do not cut mid-sentence).
-- Contain a strong hook, surprising fact, emotional peak, or punchline.
+- Prefer moments with high information density (few wasted seconds).
+- A clip hitting 5+ signals scores 80+; 3-4 signals scores 50-79; fewer = below 50.
 
 Return a JSON array. Each element:
 {{
   "start_seconds": <number>,
   "end_seconds": <number>,
-  "reason": "<why this segment is compelling>",
-  "hook": "<one short punchy sentence for on-screen/first-line hook>"
+  "reason": "<why this segment is compelling, mention which signals it hits>",
+  "hook": "<one short punchy sentence for on-screen/first-line hook>",
+  "score": <integer 0-100>,
+  "virality_signals": [<list of signal names from: hook, emotional_peak, opinion_bomb, revelation, conflict, quotable, story_peak, practical_value>]
 }}
 
 Transcript:
 {transcript_text}
 """
 
-    data = generate_json(prompt)
-    if isinstance(data, dict):
-        data = data.get("segments", [])
 
-    segments: list[Segment] = []
-    for item in data:
-        try:
-            start = float(item["start_seconds"])
-            end = float(item["end_seconds"])
-        except (KeyError, TypeError, ValueError):
-            continue
+# --------------------------------------------------------------------------- #
+#  Long-video chunking
+# --------------------------------------------------------------------------- #
 
-        # Clamp to valid bounds and enforce length limits.
-        start = max(0.0, min(start, total))
-        end = max(0.0, min(end, total))
-        if end <= start:
-            continue
+def _chunk_transcript(
+    transcript: list[TranscriptSegment],
+    chunk_minutes: int = 20,
+    overlap_seconds: float = 60.0,
+) -> list[list[TranscriptSegment]]:
+    """Split a long transcript into overlapping windows.
 
-        duration = end - start
-        if duration < config.min_short_seconds:
-            end = min(total, start + config.min_short_seconds)
-        elif duration > config.max_short_seconds:
-            end = start + config.max_short_seconds
+    For videos under 30 minutes, returns the full transcript as a single chunk.
+    For longer videos, splits into `chunk_minutes`-minute windows with
+    `overlap_seconds` overlap so cross-boundary highlights are not missed.
+    """
+    if not transcript:
+        return []
 
-        segments.append(
-            Segment(
-                start=start,
-                end=end,
-                reason=str(item.get("reason", "")),
-                hook=str(item.get("hook", "")),
-            )
+    total_duration = transcript[-1].end
+    chunk_seconds = chunk_minutes * 60
+
+    # Short videos: process the whole thing at once.
+    if total_duration <= chunk_seconds + 120:
+        return [transcript]
+
+    chunks: list[list[TranscriptSegment]] = []
+    chunk_start = 0.0
+
+    while chunk_start < total_duration:
+        chunk_end = chunk_start + chunk_seconds
+
+        # Collect segments that overlap this window.
+        window = [seg for seg in transcript if seg.end > chunk_start and seg.start < chunk_end]
+        if window:
+            chunks.append(window)
+
+        # Advance by chunk length minus overlap.
+        chunk_start += chunk_seconds - overlap_seconds
+
+    return chunks
+
+
+def _merge_and_rank_segments(
+    all_segments: list[Segment],
+    max_count: int,
+) -> list[Segment]:
+    """Merge segments from multiple chunks, dedup overlapping, and keep top N.
+
+    When two segments overlap by >50% of the shorter one's duration, the
+    lower-scoring one is dropped (same logic as AI-Youtube-Shorts-Generator).
+    """
+    if not all_segments:
+        return []
+
+    # Sort by score descending so higher-scoring segments are kept.
+    all_segments.sort(key=lambda s: s.score, reverse=True)
+
+    kept: list[Segment] = []
+    for seg in all_segments:
+        is_duplicate = False
+        for existing in kept:
+            # Check overlap as fraction of the shorter segment.
+            overlap_start = max(seg.start, existing.start)
+            overlap_end = min(seg.end, existing.end)
+            overlap = max(0.0, overlap_end - overlap_start)
+            shorter = min(seg.duration, existing.duration)
+            if shorter > 0 and overlap / shorter > 0.50:
+                is_duplicate = True
+                break
+        if not is_duplicate:
+            kept.append(seg)
+
+    return kept[:max_count]
+
+
+# --------------------------------------------------------------------------- #
+#  Main entry point
+# --------------------------------------------------------------------------- #
+
+def find_segments(
+    transcript: list[TranscriptSegment],
+    video_title: str,
+    perf_hint: str = "",
+) -> list[Segment]:
+    if not transcript:
+        return []
+
+    transcript_text = _format_transcript(transcript)
+    total = transcript[-1].end
+
+    # Step 1: Classify content type and density (one LLM call).
+    try:
+        content_type, density = _classify_content(transcript_text, video_title)
+        print(f"  -> Content type: {content_type} | density: {density}")
+    except Exception:
+        content_type, density = "other", "medium"
+
+    hint_line = (
+        f"\nWhat has worked before on this channel (bias toward this): {perf_hint}\n"
+        if perf_hint
+        else ""
+    )
+
+    # Step 2: Split long videos into overlapping chunks.
+    chunk_minutes = getattr(config, "chunk_minutes", 20)
+    chunk_overlap = getattr(config, "chunk_overlap_seconds", 60)
+    chunks = _chunk_transcript(transcript, chunk_minutes, chunk_overlap)
+
+    if len(chunks) > 1:
+        print(f"  -> Long video: split into {len(chunks)} chunks ({chunk_minutes}min each, {chunk_overlap}s overlap)")
+
+    # Step 3: Find highlights in each chunk.
+    all_segments: list[Segment] = []
+
+    for chunk_idx, chunk in enumerate(chunks):
+        if len(chunks) > 1:
+            chunk_text = _format_transcript(chunk)
+            chunk_start = chunk[0].start
+            chunk_end = chunk[-1].end
+            print(f"  -> Processing chunk {chunk_idx + 1}/{len(chunks)} ({chunk_start:.0f}s–{chunk_end:.0f}s)")
+        else:
+            chunk_text = transcript_text
+            chunk_start = 0.0
+            chunk_end = total
+
+        prompt = _build_virality_prompt(
+            transcript_text=chunk_text,
+            video_title=video_title,
+            total_seconds=int(total),
+            shorts_count=config.shorts_per_video * 2 if len(chunks) > 1 else config.shorts_per_video,
+            min_seconds=config.min_short_seconds,
+            max_seconds=config.max_short_seconds,
+            content_type=content_type,
+            density=density,
+            hint_line=hint_line,
         )
 
-    return segments[: config.shorts_per_video]
+        data = generate_json(prompt)
+        if isinstance(data, dict):
+            data = data.get("segments", [])
+
+        for item in data:
+            try:
+                start = float(item["start_seconds"])
+                end = float(item["end_seconds"])
+            except (KeyError, TypeError, ValueError):
+                continue
+
+            # Clamp to valid bounds.
+            start = max(0.0, min(start, total))
+            end = max(0.0, min(end, total))
+            if end <= start:
+                continue
+
+            # Snap cut points to real sentence boundaries.
+            if config.snap_to_sentences:
+                start, end = _snap_to_sentences(start, end, transcript, total)
+            else:
+                duration = end - start
+                if duration < config.min_short_seconds:
+                    end = min(total, start + config.min_short_seconds)
+                elif duration > config.max_short_seconds:
+                    end = start + config.max_short_seconds
+
+            try:
+                score = float(item.get("score", 50))
+            except (TypeError, ValueError):
+                score = 50.0
+
+            raw_signals = item.get("virality_signals", [])
+            if isinstance(raw_signals, list):
+                virality_signals = [str(s) for s in raw_signals if s]
+            else:
+                virality_signals = []
+
+            all_segments.append(
+                Segment(
+                    start=start,
+                    end=end,
+                    reason=str(item.get("reason", "")),
+                    hook=str(item.get("hook", "")),
+                    score=max(0.0, min(score, 100.0)),
+                    virality_signals=virality_signals,
+                )
+            )
+
+    # Step 4: Merge across chunks and dedup overlapping segments.
+    if len(chunks) > 1:
+        result = _merge_and_rank_segments(all_segments, config.shorts_per_video)
+        print(f"  -> Merged {len(all_segments)} candidates into {len(result)} unique segments")
+    else:
+        all_segments.sort(key=lambda s: s.score, reverse=True)
+        result = all_segments[: config.shorts_per_video]
+
+    return result
