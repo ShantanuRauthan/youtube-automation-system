@@ -255,6 +255,16 @@ def _snap_to_sentences(
         if end - transcript[start_idx - 1].start > max_len:
             break
         start_idx -= 1
+
+    # Ensure at least 5s context lead-in before the highlight moment.
+    # Walk back to include setup if we're starting too close to the action.
+    MIN_CONTEXT_SECONDS = 5.0
+    context_start = start - MIN_CONTEXT_SECONDS
+    while start_idx > 0 and transcript[start_idx - 1].start >= context_start:
+        if end - transcript[start_idx - 1].start > max_len:
+            break
+        start_idx -= 1
+
     snapped_start = max(0.0, transcript[start_idx].start)
 
     # ---- snap END to a sentence ending ----
@@ -325,31 +335,45 @@ YOUR TASK:
 Find the {shorts_count} MOST viral, self-contained moment(s) that would work as a
 standalone vertical Short (TikTok, Reels, YouTube Shorts).
 
+CRITICAL RULE — CONTEXT BEFORE HOOK:
+Every short MUST start with enough context so a viewer who has never seen this
+video can follow along. The first 3-5 seconds should establish:
+  - WHO is speaking or WHAT topic is being discussed
+  - WHY this moment matters (the setup, not just the punchline)
+
+BAD: Starting at "And then he said..." (no context — viewer is confused)
+GOOD: Starting at "This one experiment changed everything we knew about gravity.
+      And then he said..." (context + hook)
+
+Always start your clip 5-15 seconds BEFORE the actual highlight moment to give
+the viewer time to orient. The highlight can land at second 5-10, not second 0.
+
 SCORING FRAMEWORK (8 Virality Signals):
 Score each candidate 0-100 based on how many of these signals it hits:
-1. HOOK — Does it grab attention in the first 3 seconds? (+15 points)
-2. EMOTIONAL PEAK — Does it trigger surprise, laughter, anger, or empathy? (+15 points)
-3. OPINION BOMB — Is it polarizing, counter-intuitive, or controversial? (+12 points)
-4. REVELATION — Does it reveal a surprising fact, stat, or confession? (+12 points)
-5. CONFLICT — Is there tension, disagreement, or stakes? (+10 points)
-6. QUOTABLE — Is there a memorable one-liner people would share? (+10 points)
-7. STORY PEAK — Is there a climax, twist, or resolution? (+10 points)
-8. PRACTICAL VALUE — Does it teach something actionable? (+6 points)
+1. SELF-CONTAINED — Does it make sense without watching the rest? (+18 points)
+2. HOOK — Does it grab attention in the first 3-5 seconds? (+15 points)
+3. EMOTIONAL PEAK — Does it trigger surprise, laughter, anger, or empathy? (+12 points)
+4. OPINION BOMB — Is it polarizing, counter-intuitive, or controversial? (+12 points)
+5. REVELATION — Does it reveal a surprising fact, stat, or confession? (+12 points)
+6. CONFLICT — Is there tension, disagreement, or stakes? (+10 points)
+7. QUOTABLE — Is there a memorable one-liner people would share? (+10 points)
+8. PRACTICAL VALUE — Does it teach something actionable? (+11 points)
 
 CONSTRAINTS:
 - Each clip must be between {min_seconds} and {max_seconds} seconds.
+- Start at least 5 seconds BEFORE the main moment (context lead-in).
 - Start and end on a complete thought (do not cut mid-sentence).
 - Prefer moments with high information density (few wasted seconds).
 - A clip hitting 5+ signals scores 80+; 3-4 signals scores 50-79; fewer = below 50.
 
 Return a JSON array. Each element:
 {{
-  "start_seconds": <number>,
+  "start_seconds": <number — include context, start BEFORE the main moment>,
   "end_seconds": <number>,
   "reason": "<why this segment is compelling, mention which signals it hits>",
   "hook": "<one short punchy sentence for on-screen/first-line hook>",
   "score": <integer 0-100>,
-  "virality_signals": [<list of signal names from: hook, emotional_peak, opinion_bomb, revelation, conflict, quotable, story_peak, practical_value>]
+  "virality_signals": [<list of signal names from: self_contained, hook, emotional_peak, opinion_bomb, revelation, conflict, quotable, practical_value>]
 }}
 
 Transcript:
