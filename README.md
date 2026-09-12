@@ -93,18 +93,38 @@ music/
   dark-suspense-ambient.mp3 -> mood: dark
 ```
 
-Set `MUSIC_MODE=auto` in `.env` to enable. The system auto-selects music based on content type:
+### Auto-download from Pixabay (recommended)
+
+```bash
+# Get a free API key at: https://pixabay.com/api/docs/
+# Then run:
+python scripts/download_music.py
+```
+
+This downloads ~32 royalty-free CC0 tracks across all 8 moods (30-90 seconds each, perfect for Shorts).
+
+### Manual download
+
+Grab tracks from these free sources and drop them into `music/`:
+- [Pixabay Music](https://pixabay.com/music/) — CC0 license
+- [Free Music Archive](https://freemusicarchive.org/) — CC0/CC-BY
+- [YouTube Audio Library](https://studio.youtube.com/channel/music) — free for YT creators
+
+### Enable music
+
+Set in `.env`:
+```env
+MUSIC_MODE=auto
+MUSIC_VOLUME=0.08
+```
+
+The system auto-selects music based on content type:
 - Podcast/interview → chill, focus
 - Tutorial/lecture → focus, chill
 - Commentary/debate → dark, epic, action
 - Vlog → happy, chill, comedy
 
 Mood categories: `chill`, `happy`, `dark`, `epic`, `sad`, `focus`, `comedy`, `action`
-
-**Music sources (all free, no attribution required):**
-- [Pixabay Music](https://pixabay.com/music/) — CC0 license
-- [Free Music Archive](https://freemusicarchive.org/) — CC0/CC-BY
-- [YouTube Audio Library](https://studio.youtube.com/channel/music) — free for YT creators
 
 ## Tuning (`.env`)
 
