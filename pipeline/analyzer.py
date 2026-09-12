@@ -167,6 +167,10 @@ def _format_transcript(transcript: list[TranscriptSegment]) -> str:
     return "\n".join(lines)
 
 
+# Groq free tier: 8000 TPM. ~1 token per 4 chars. Keep under 6000 chars (~1500 tokens).
+MAX_TRANSCRIPT_CHARS = 6000
+
+
 def _truncate_transcript(transcript_text: str, max_chars: int = MAX_TRANSCRIPT_CHARS) -> str:
     """Smart truncation: keep beginning + end, sample from middle.
 
@@ -210,9 +214,6 @@ def _truncate_transcript(transcript_text: str, max_chars: int = MAX_TRANSCRIPT_C
 
 
 _SENTENCE_END = (".", "!", "?", "…", '"', "\u201d")
-
-# Groq free tier: 8000 TPM. ~1 token per 4 chars. Keep under 6000 chars (~1500 tokens).
-MAX_TRANSCRIPT_CHARS = 6000
 
 
 def _ends_sentence(text: str) -> bool:
