@@ -144,46 +144,73 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
     step(f"AI SELECTED {len(found)} SEGMENT(S):")
     step(f"{'='*60}")
 
-    for idx, seg in enumerate(found, 1):
-        # Dedup: skip segments we've already turned into a Short (safe re-runs).
-        # If overlapping, only skip if the existing Short scores higher or equal.
-        if config.dedup:
-            overlaps, existing_score = state.segment_overlaps(video.video_id, seg.start, seg.end)
-            if overlaps:
-                if seg.score <= existing_score:
-                    step(f"Segment {idx}: skipped (existing Short scores {existing_score:.0f} >= {seg.score:.0f})")
-                    continue
-                else:
-                    step(f"Segment {idx}: new score {seg.score:.0f} > existing {existing_score:.0f} — replacing")
+    # Save selected segments to a file for inspection.
+    selected_path = os.path.join(work_dir, f"{video.video_id}_selected.txt")
+    with open(selected_path, "w") as sf:
+        sf.write(f"VIDEO: {video.title}\n")
+        sf.write(f"DURATION: {segments_transcript[-1].end:.0f}s\n")
+        sf.write(f"SEGMENTS FOUND: {len(found)}\n\n")
 
-        # Extract the selected text from transcript.
-        selected_text = []
-        for t in segments_transcript:
-            if t.end > seg.start and t.start < seg.end:
-                selected_text.append(f"  [{int(t.start//60):02d}:{int(t.start%60):02d}] {t.text}")
+        for idx, seg in enumerate(found, 1):
+            # Dedup: skip segments we've already turned into a Short (safe re-runs).
+            # If overlapping, only skip if the existing Short scores higher or equal.
+            if config.dedup:
+                overlaps, existing_score = state.segment_overlaps(video.video_id, seg.start, seg.end)
+                if overlaps:
+                    if seg.score <= existing_score:
+                        step(f"Segment {idx}: skipped (existing Short scores {existing_score:.0f} >= {seg.score:.0f})")
+                        continue
+                    else:
+                        step(f"Segment {idx}: new score {seg.score:.0f} > existing {existing_score:.0f} — replacing")
 
-        # Show 3 lines before the segment for context.
-        context_before = []
-        for t in segments_transcript:
-            if t.end <= seg.start:
-                context_before.append(t)
-        context_before = context_before[-3:]  # last 3 lines before
+            # Extract the selected text from transcript.
+            selected_text = []
+            for t in segments_transcript:
+                if t.end > seg.start and t.start < seg.end:
+                    selected_text.append(f"  [{int(t.start//60):02d}:{int(t.start%60):02d}] {t.text}")
 
-        signals_str = ", ".join(seg.virality_signals) if seg.virality_signals else "n/a"
-        step(f"\n--- Segment {idx}: {seg.start:.0f}s–{seg.end:.0f}s ({seg.duration:.0f}s) | score={seg.score:.0f} ---")
-        step(f"Signals: {signals_str}")
-        step(f"Hook: {seg.hook[:100]}")
-        step(f"Reason: {seg.reason[:150]}")
+            # Show 3 lines before the segment for context.
+            context_before = []
+            for t in segments_transcript:
+                if t.end <= seg.start:
+                    context_before.append(t)
+            context_before = context_before[-3:]  # last 3 lines before
 
-        if context_before:
-            step(f"\nContext BEFORE (what leads into this):")
-            for line in context_before:
-                m, s = divmod(int(line.start), 60)
-                step(f"  [{m:02d}:{s:02d}] {line.text}")
+            signals_str = ", ".join(seg.virality_signals) if seg.virality_signals else "n/a"
+            step(f"\n--- Segment {idx}: {seg.start:.0f}s–{seg.end:.0f}s ({seg.duration:.0f}s) | score={seg.score:.0f} ---")
+            step(f"Signals: {signals_str}")
+            step(f"Hook: {seg.hook[:100]}")
+            step(f"Reason: {seg.reason[:150]}")
 
-        step(f"\nSELECTED TEXT ({len(selected_text)} lines):")
-        for line in selected_text:
-            step(line)
+            if context_before:
+                step(f"\nContext BEFORE (what leads into this):")
+                for line in context_before:
+                    m, s = divmod(int(line.start), 60)
+                    step(f"  [{m:02d}:{s:02d}] {line.text}")
+
+            step(f"\nSELECTED TEXT ({len(selected_text)} lines):")
+            for line in selected_text:
+                step(line)
+
+            # Write to file.
+            sf.write(f"{'='*60}\n")
+            sf.write(f"SEGMENT {idx}: {seg.start:.0f}s – {seg.end:.0f}s ({seg.duration:.0f}s)\n")
+            sf.write(f"SCORE: {seg.score:.0f}/100\n")
+            sf.write(f"SIGNALS: {signals_str}\n")
+            sf.write(f"HOOK: {seg.hook}\n")
+            sf.write(f"REASON: {seg.reason}\n\n")
+            if context_before:
+                sf.write("CONTEXT BEFORE:\n")
+                for line in context_before:
+                    m, s = divmod(int(line.start), 60)
+                    sf.write(f"  [{m:02d}:{s:02d}] {line.text}\n")
+                sf.write("\n")
+            sf.write("SELECTED TEXT:\n")
+            for line in selected_text:
+                sf.write(f"{line}\n")
+            sf.write("\n")
+
+    step(f"\nSelected segments saved to: {selected_path}")
 
         base = f"{video.video_id}_short{idx}"
         out_path = os.path.join(config.output_dir, f"{base}.mp4")
