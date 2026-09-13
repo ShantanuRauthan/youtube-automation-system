@@ -103,7 +103,11 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
     segments_transcript = transcript_mod.fetch_transcript(video.video_id)
 
     step("Downloading source video")
-    source_path = downloader.download_video(video.video_id, work_dir)
+    try:
+        source_path = downloader.download_video(video.video_id, work_dir)
+    except Exception as e:
+        step(f"Download failed (network issue?): {str(e)[:80]}. Skipping.")
+        return produced
 
     if not segments_transcript:
         step("No YouTube captions found — trying local Whisper fallback")
