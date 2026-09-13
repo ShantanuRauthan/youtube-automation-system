@@ -117,6 +117,14 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
         step("Could not obtain a transcript. Skipping this video.")
         return produced
 
+    # Save full transcript for debugging.
+    transcript_path = os.path.join(work_dir, f"{video.video_id}_transcript.txt")
+    with open(transcript_path, "w") as f:
+        for seg in segments_transcript:
+            m, s = divmod(int(seg.start), 60)
+            f.write(f"[{m:02d}:{s:02d}] {seg.text}\n")
+    step(f"Full transcript saved to: {transcript_path}")
+
     step("Analyzing transcript for interesting segments (AI)")
 
     # Detect content type once per video for music selection.
@@ -131,6 +139,11 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
         step("AI found no strong segments. Skipping.")
         return produced
 
+    # Show what the AI picked with surrounding context.
+    step(f"\n{'='*60}")
+    step(f"AI SELECTED {len(found)} SEGMENT(S):")
+    step(f"{'='*60}")
+
     for idx, seg in enumerate(found, 1):
         # Dedup: skip segments we've already turned into a Short (safe re-runs).
         # If overlapping, only skip if the existing Short scores higher or equal.
@@ -143,9 +156,34 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
                 else:
                     step(f"Segment {idx}: new score {seg.score:.0f} > existing {existing_score:.0f} — replacing")
 
+        # Extract the selected text from transcript.
+        selected_text = []
+        for t in segments_transcript:
+            if t.end > seg.start and t.start < seg.end:
+                selected_text.append(f"  [{int(t.start//60):02d}:{int(t.start%60):02d}] {t.text}")
+
+        # Show 3 lines before the segment for context.
+        context_before = []
+        for t in segments_transcript:
+            if t.end <= seg.start:
+                context_before.append(t)
+        context_before = context_before[-3:]  # last 3 lines before
+
         signals_str = ", ".join(seg.virality_signals) if seg.virality_signals else "n/a"
-        step(f"Segment {idx}: {seg.start:.0f}s–{seg.end:.0f}s ({seg.duration:.0f}s) | score={seg.score:.0f} | {signals_str}")
-        step(f"  Hook: {seg.hook[:80]}")
+        step(f"\n--- Segment {idx}: {seg.start:.0f}s–{seg.end:.0f}s ({seg.duration:.0f}s) | score={seg.score:.0f} ---")
+        step(f"Signals: {signals_str}")
+        step(f"Hook: {seg.hook[:100]}")
+        step(f"Reason: {seg.reason[:150]}")
+
+        if context_before:
+            step(f"\nContext BEFORE (what leads into this):")
+            for line in context_before:
+                m, s = divmod(int(line.start), 60)
+                step(f"  [{m:02d}:{s:02d}] {line.text}")
+
+        step(f"\nSELECTED TEXT ({len(selected_text)} lines):")
+        for line in selected_text:
+            step(line)
 
         base = f"{video.video_id}_short{idx}"
         out_path = os.path.join(config.output_dir, f"{base}.mp4")
