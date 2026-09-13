@@ -10,6 +10,7 @@ google-auth-httplib2>=0.2.0
 # Transcript + download
 youtube-transcript-api>=0.6.2
 yt-dlp>=2024.8.6
+pytubefix>=8.0.0
 
 # AI provider (Groq recommended, Gemini free tier, Ollama local).
 # Groq: free, fast, high limits — get a key at https://console.groq.com/keys
