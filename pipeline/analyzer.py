@@ -238,12 +238,8 @@ def _snap_to_sentences(
     """Move the AI's rough start/end to real transcript boundaries so the clip
     begins and ends on a complete sentence instead of mid-word.
 
-    - Start snaps back to the beginning of the caption line it falls in, then
-      walks further back while the previous line does NOT end a sentence (i.e.
-      we're mid-sentence), so we capture the whole sentence opening.
-    - End snaps forward to the end of the caption line it falls in, then extends
-      to the next line that ends on sentence punctuation, as long as we stay
-      under the max length. A small tail pad keeps the final word from clipping.
+    - Start snaps to the nearest NATURAL PAUSE (sentence ending + new sentence).
+    - End snaps to a COMPLETE SENTENCE with closure, then adds breathing room.
     """
     if not transcript:
         return start, end
@@ -252,42 +248,63 @@ def _snap_to_sentences(
     max_len = float(config.max_short_seconds)
     n = len(transcript)
 
-    # ---- snap START to a sentence beginning ----
+    # ---- find the line closest to the AI's start ----
     start_idx = 0
     for i, t in enumerate(transcript):
         if t.end > start:
             start_idx = i
             break
-    # walk back while the previous line didn't finish a sentence
-    while start_idx > 0 and not _ends_sentence(transcript[start_idx - 1].text):
-        # don't run away past the max clip length
-        if end - transcript[start_idx - 1].start > max_len:
-            break
-        start_idx -= 1
 
-    # Ensure at least 5s context lead-in before the highlight moment.
-    # Walk back to include setup if we're starting too close to the action.
-    MIN_CONTEXT_SECONDS = 5.0
-    context_start = start - MIN_CONTEXT_SECONDS
-    while start_idx > 0 and transcript[start_idx - 1].start >= context_start:
-        if end - transcript[start_idx - 1].start > max_len:
+    # Walk back to find a NATURAL PAUSE: a line that ends a sentence,
+    # followed by a new line that starts a new thought.
+    # This gives the short a natural "breathing in" start.
+    best_start_idx = start_idx
+    for i in range(start_idx, max(start_idx - 15, -1), -1):
+        if i < 0:
             break
-        start_idx -= 1
+        # Check if this line ends a sentence (natural pause).
+        if _ends_sentence(transcript[i].text):
+            # The NEXT line starts the new thought — that's our ideal start.
+            next_idx = i + 1
+            if next_idx < n:
+                # Make sure we don't exceed max length.
+                if end - transcript[next_idx].start <= max_len:
+                    best_start_idx = next_idx
+                    break
 
+    start_idx = best_start_idx
     snapped_start = max(0.0, transcript[start_idx].start)
 
-    # ---- snap END to a sentence ending ----
+    # ---- find the line closest to the AI's end ----
     end_idx = start_idx
     for i in range(start_idx, n):
         if transcript[i].start < end:
             end_idx = i
         else:
             break
-    # extend forward to the next line that ends a sentence, within max length
-    while end_idx < n - 1 and not _ends_sentence(transcript[end_idx].text):
-        if transcript[end_idx + 1].end - snapped_start > max_len:
-            break
-        end_idx += 1
+
+    # Walk FORWARD to find a CLEAN ENDING: a line that ends a sentence
+    # and is followed by a pause or topic change.
+    best_end_idx = end_idx
+    for i in range(end_idx, min(end_idx + 10, n)):
+        if _ends_sentence(transcript[i].text):
+            # Good — this line ends a sentence.
+            # Check if the next line starts something new (topic change).
+            if i + 1 < n:
+                next_text = transcript[i + 1].text.lower().strip()
+                # Topic changers = good ending points.
+                topic_changers = ["so ", "now ", "but ", "and ", "the ", "this ", "that ",
+                                  "what ", "how ", "why ", "when ", "where ", "who "]
+                if any(next_text.startswith(tc) for tc in topic_changers):
+                    best_end_idx = i
+                    break
+            else:
+                # Last line — good ending.
+                best_end_idx = i
+                break
+            best_end_idx = i  # At minimum, end on a sentence boundary.
+
+    end_idx = best_end_idx
     snapped_end = transcript[end_idx].end
 
     # ---- enforce length using whole lines where possible ----
@@ -297,6 +314,9 @@ def _snap_to_sentences(
             break
         end_idx += 1
         snapped_end = transcript[end_idx].end
+        # If we added a line that ends a sentence, good — stop here.
+        if _ends_sentence(transcript[end_idx].text):
+            break
 
     # too long: trim whole lines off the end until within the maximum
     while snapped_end - snapped_start > max_len and end_idx > start_idx:
@@ -304,15 +324,14 @@ def _snap_to_sentences(
         snapped_end = transcript[end_idx].end
 
     # After trimming, ensure we still end on a sentence boundary.
-    # If not, keep trimming until we find one (even if slightly under max_len).
     attempts = 0
     while end_idx > start_idx and not _ends_sentence(transcript[end_idx].text) and attempts < 10:
         end_idx -= 1
         snapped_end = transcript[end_idx].end
         attempts += 1
 
-    # small breathing room so the last word isn't cut, but never past the video
-    snapped_end = min(total, snapped_end + config.clip_tail_pad)
+    # Add breathing room at end (so the last word isn't clipped).
+    snapped_end = min(total, snapped_end + 1.0)
 
     if snapped_end <= snapped_start:
         return start, end
@@ -359,41 +378,56 @@ NEVER SELECT — AUTO-REJECT (score 0, do not return):
 - Filler: "um", "uh", "so yeah", "anyway", "moving on"
 - Metadata: view counts, subscriber counts, "smash that bell"
 
-CONTEXT BEFORE HOOK — CRITICAL:
-Every short MUST start with enough context so a viewer who has never seen this
-video can follow along. The first 3-5 seconds should establish:
-  - WHO is speaking or WHAT topic is being discussed
-  - WHY this moment matters (the setup, not just the punchline)
+START RULE — NATURAL PAUSE + CONTEXT:
+Your short must feel like a complete scene, not a random clip. Start at a NATURAL
+PAUSE or TOPIC TRANSITION — a moment where the speaker begins a new thought.
 
-BAD: Starting at "And then he said..." (no context — viewer is confused)
-GOOD: Starting at "This one experiment changed everything we knew about gravity.
-      And then he said..." (context + hook)
+The first 3-5 seconds should feel like a calm introduction, not thrown into action:
+  - Start at a breath, a pause, a "so...", "now...", "here's the thing..."
+  - OR start at the beginning of a clear sentence/statement
+  - Include enough context so a first-time viewer knows WHO and WHAT
 
-Always start your clip 5-15 seconds BEFORE the actual highlight moment to give
-the viewer time to orient. The highlight can land at second 5-10, not second 0.
+BAD:  "he said that it was wrong" (mid-thought, no context)
+BAD:  jumping straight into action with no setup
+GOOD: "So I've been thinking about this for months. And here's what I realized..."
+      (natural pause + context + hook incoming)
 
-ENDING RULE — NEVER CUT MID-SENTENCE:
-Your clip MUST end on a complete thought. The last sentence should feel like
-a natural stopping point — not cut off mid-word or mid-clause.
+The highlight/punchline should land at seconds 5-10, NOT at second 0.
 
-If the segment you want runs past the max duration, TRIM from the END (remove
-the last sentence) rather than cutting mid-sentence. A clip with a clean
-ending at 50 seconds is better than a 60-second clip that cuts off abruptly.
+END RULE — COMPLETE THOUGHT + NATURAL CLOSURE:
+Your short MUST end on a COMPLETE sentence that feels like a natural stopping point.
+The last sentence should have a sense of finality — a conclusion, a statement, a pause.
+
+Look for endings like:
+  - A complete statement: "...and that's why it matters."
+  - A concluding thought: "...so I'll never do that again."
+  - A natural pause after a point is made.
+
+NEVER end on:
+  - A question (unless it's a cliffhanger hook)
+  - Mid-sentence: "and then they found..." (NO — where's the rest?)
+  - A hanging clause: "which is why..." (NO — finish the thought)
+  - Filler: "so yeah..." or "anyway..."
+
+If your segment runs long, TRIM from the middle or REMOVE earlier sentences to
+keep the ending intact. A clean 45-second clip beats a 60-second clip that
+cuts off mid-word.
 
 SCORING FRAMEWORK (100 points max):
 Score each candidate 0-100. Be CRITICAL — most clips are 30-60, only exceptional
 ones reach 70+. Do NOT give high scores to average content.
 
 Signals:
-1. SELF-CONTAINED — Does it make sense without watching the rest? (+20 pts)
-2. CONTEXT LEAD-IN — Does it start 5+ seconds before the main moment? (+15 pts)
-3. HOOK — Does it grab attention in the first 3-5 seconds? (+12 pts)
-4. EMOTIONAL PEAK — Does it trigger surprise, laughter, anger, empathy? (+10 pts)
-5. REVELATION — Does it reveal a surprising fact, stat, or confession? (+10 pts)
-6. CONFLICT — Is there tension, disagreement, or stakes? (+8 pts)
-7. QUOTABLE — Is there a memorable one-liner people would share? (+8 pts)
-8. PRACTICAL VALUE — Does it teach something actionable? (+7 pts)
-9. CLEAN ENDING — Does it end on a complete thought? (+10 pts)
+1. SELF-CONTAINED — Does it make sense without watching the rest? (+18 pts)
+2. NATURAL_START — Does it start at a pause, breath, or topic transition? (+15 pts)
+3. CONTEXT_LEAD-IN — Does it include 5+ seconds of setup before the highlight? (+12 pts)
+4. HOOK — Does the highlight land within the first 5-10 seconds? (+10 pts)
+5. EMOTIONAL_PEAK — Does it trigger surprise, laughter, anger, empathy? (+10 pts)
+6. REVELATION — Does it reveal a surprising fact, stat, or confession? (+10 pts)
+7. CONFLICT — Is there tension, disagreement, or stakes? (+8 pts)
+8. QUOTABLE — Is there a memorable one-liner people would share? (+7 pts)
+9. PRACTICAL_VALUE — Does it teach something actionable? (+5 pts)
+10. CLEAN_ENDING — Does it end on a complete sentence with closure? (+15 pts)
 
 Score interpretation:
 - 80-100: Exceptional (only 1-2 per video max, if any)
@@ -403,12 +437,12 @@ Score interpretation:
 
 Return a JSON array. Each element:
 {{
-  "start_seconds": <number — include context, start BEFORE the main moment>,
-  "end_seconds": <number>,
+  "start_seconds": <number — at a natural pause, BEFORE the main moment>,
+  "end_seconds": <number — at end of a complete sentence>,
   "reason": "<why this segment is compelling, mention which signals it hits>",
   "hook": "<one short punchy sentence for on-screen/first-line hook>",
   "score": <integer 0-100, be critical>,
-  "virality_signals": [<list of signal names from: self_contained, context_lead_in, hook, emotional_peak, revelation, conflict, quotable, practical_value, clean_ending>]
+  "virality_signals": [<list of signal names from: self_contained, natural_start, context_lead_in, hook, emotional_peak, revelation, conflict, quotable, practical_value, clean_ending>]
 }}
 
 Transcript:
