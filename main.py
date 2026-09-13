@@ -152,17 +152,6 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
         sf.write(f"SEGMENTS FOUND: {len(found)}\n\n")
 
         for idx, seg in enumerate(found, 1):
-            # Dedup: skip segments we've already turned into a Short (safe re-runs).
-            # If overlapping, only skip if the existing Short scores higher or equal.
-            if config.dedup:
-                overlaps, existing_score = state.segment_overlaps(video.video_id, seg.start, seg.end)
-                if overlaps:
-                    if seg.score <= existing_score:
-                        step(f"Segment {idx}: skipped (existing Short scores {existing_score:.0f} >= {seg.score:.0f})")
-                        continue
-                    else:
-                        step(f"Segment {idx}: new score {seg.score:.0f} > existing {existing_score:.0f} — replacing")
-
             # Extract the selected text from transcript.
             selected_text = []
             for t in segments_transcript:
@@ -174,7 +163,7 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
             for t in segments_transcript:
                 if t.end <= seg.start:
                     context_before.append(t)
-            context_before = context_before[-3:]  # last 3 lines before
+            context_before = context_before[-3:]
 
             signals_str = ", ".join(seg.virality_signals) if seg.virality_signals else "n/a"
             step(f"\n--- Segment {idx}: {seg.start:.0f}s–{seg.end:.0f}s ({seg.duration:.0f}s) | score={seg.score:.0f} ---")
@@ -211,6 +200,18 @@ def process_video(video, category_name: str, category_id: str, work_dir: str, ru
             sf.write("\n")
 
     step(f"\nSelected segments saved to: {selected_path}")
+
+    # Process each segment into a Short.
+    for idx, seg in enumerate(found, 1):
+        # Dedup: skip segments we've already turned into a Short (safe re-runs).
+        if config.dedup:
+            overlaps, existing_score = state.segment_overlaps(video.video_id, seg.start, seg.end)
+            if overlaps:
+                if seg.score <= existing_score:
+                    step(f"Segment {idx}: skipped (existing Short scores {existing_score:.0f} >= {seg.score:.0f})")
+                    continue
+                else:
+                    step(f"Segment {idx}: new score {seg.score:.0f} > existing {existing_score:.0f} — replacing")
 
         base = f"{video.video_id}_short{idx}"
         out_path = os.path.join(config.output_dir, f"{base}.mp4")
